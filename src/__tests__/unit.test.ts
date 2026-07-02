@@ -628,6 +628,196 @@ describe('claude-provider', async () => {
   });
 });
 
+// ── Claude Memory (bridge-managed section in ~/.claude/CLAUDE.md) ──
+
+describe('claude-memory', async () => {
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+
+  const {
+    ClaudeMemory,
+    BRIDGE_SECTION_START,
+    BRIDGE_SECTION_END,
+    parseEntries,
+    upsertEntry,
+    rebuildSection,
+  } = await import('../claude-memory.js');
+
+  function tmpFile(): string {
+    return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cm-test-')), 'CLAUDE.md');
+  }
+
+  test('readEntries returns empty when file does not exist', () => {
+    const mem = new ClaudeMemory(tmpFile());
+    assert.equal(mem.readEntries().length, 0);
+    assert.equal(mem.readAll(), '');
+    assert.equal(mem.exists(), false);
+  });
+
+  test('setEntry creates bridge section when file is empty', () => {
+    const path_ = tmpFile();
+    const mem = new ClaudeMemory(path_);
+    mem.setEntry('language', '中文回复');
+    const content = fs.readFileSync(path_, 'utf-8');
+    assert.ok(content.includes(BRIDGE_SECTION_START), 'should have start marker');
+    assert.ok(content.includes(BRIDGE_SECTION_END), 'should have end marker');
+    assert.ok(content.includes('## language'), 'should have key heading');
+    assert.ok(content.includes('中文回复'), 'should have value');
+    assert.equal(mem.readEntries().length, 1);
+    assert.equal(mem.readEntries()[0].key, 'language');
+    assert.equal(mem.readEntries()[0].value, '中文回复');
+  });
+
+  test('setEntry upserts existing key (replace value)', () => {
+    const path_ = tmpFile();
+    const mem = new ClaudeMemory(path_);
+    mem.setEntry('language', '中文');
+    mem.setEntry('language', '中文 + 简短');
+    const entries = mem.readEntries();
+    assert.equal(entries.length, 1, 'still 1 entry, not duplicated');
+    assert.equal(entries[0].value, '中文 + 简短');
+  });
+
+  test('setEntry adds multiple keys', () => {
+    const path_ = tmpFile();
+    const mem = new ClaudeMemory(path_);
+    mem.setEntry('language', '中文');
+    mem.setEntry('style', '简短直接');
+    mem.setEntry('cwd_default', '/home/son_goku');
+    const entries = mem.readEntries();
+    assert.equal(entries.length, 3);
+    const keys = entries.map(e => e.key).sort();
+    assert.deepEqual(keys, ['cwd_default', 'language', 'style']);
+  });
+
+  test('removeEntry returns false for missing key', () => {
+    const mem = new ClaudeMemory(tmpFile());
+    assert.equal(mem.removeEntry('nope'), false);
+  });
+
+  test('removeEntry deletes and removes section when empty', () => {
+    const path_ = tmpFile();
+    const mem = new ClaudeMemory(path_);
+    mem.setEntry('temp', 'value');
+    assert.equal(mem.removeEntry('temp'), true);
+    assert.equal(mem.readEntries().length, 0);
+    const content = fs.readFileSync(path_, 'utf-8');
+    assert.ok(!content.includes(BRIDGE_SECTION_START), 'section should be gone');
+  });
+
+  test('removeEntry deletes one of multiple, keeps section', () => {
+    const path_ = tmpFile();
+    const mem = new ClaudeMemory(path_);
+    mem.setEntry('a', '1');
+    mem.setEntry('b', '2');
+    mem.setEntry('c', '3');
+    assert.equal(mem.removeEntry('b'), true);
+    const entries = mem.readEntries();
+    assert.equal(entries.length, 2);
+    const keys = entries.map(e => e.key).sort();
+    assert.deepEqual(keys, ['a', 'c']);
+  });
+
+  // Critical: preserve user/CLI content outside the bridge section
+  test('setEntry preserves content outside bridge section byte-for-byte', () => {
+    const userContent = [
+      '# My Personal Notes',
+      '',
+      'This is content I wrote manually.',
+      '',
+      '```bash',
+      'echo hello',
+      '```',
+      '',
+    ].join('\n');
+    const path_ = tmpFile();
+    fs.writeFileSync(path_, userContent);
+    const mem = new ClaudeMemory(path_);
+    mem.setEntry('language', '中文');
+    const after = fs.readFileSync(path_, 'utf-8');
+    // User content (before bridge section) must be byte-identical
+    assert.ok(after.startsWith(userContent), 'user content must be preserved at the top');
+    // Bridge section appears at the end
+    assert.ok(after.includes(BRIDGE_SECTION_START));
+    assert.ok(after.includes('中文'));
+  });
+
+  test('removeEntry preserves content outside bridge section', () => {
+    const userContent = '# Top\n\nUser notes here.\n';
+    const path_ = tmpFile();
+    fs.writeFileSync(path_, userContent);
+    const mem = new ClaudeMemory(path_);
+    mem.setEntry('key1', 'val1');
+    // Now remove
+    mem.removeEntry('key1');
+    const after = fs.readFileSync(path_, 'utf-8');
+    // User content preserved (allow trailing whitespace normalization)
+    assert.ok(after.includes('# Top'));
+    assert.ok(after.includes('User notes here.'));
+    assert.ok(!after.includes(BRIDGE_SECTION_START), 'empty section should be removed');
+  });
+
+  // Parser unit tests (independent of file I/O)
+  test('parseEntries handles multiline values', () => {
+    const section = `
+## key1
+value line 1
+value line 2
+
+## key2
+single line
+`;
+    const entries = parseEntries(section);
+    assert.equal(entries.length, 2);
+    assert.equal(entries[0].key, 'key1');
+    assert.equal(entries[0].value, 'value line 1\nvalue line 2');
+    assert.equal(entries[1].key, 'key2');
+    assert.equal(entries[1].value, 'single line');
+  });
+
+  test('parseEntries skips entries with empty values', () => {
+    const section = `
+## key1
+## key2
+real value
+`;
+    const entries = parseEntries(section);
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].key, 'key2');
+  });
+
+  test('upsertEntry pure function (no file I/O)', () => {
+    // No existing section
+    const r1 = upsertEntry('', 'k', 'v');
+    assert.ok(r1.includes(BRIDGE_SECTION_START));
+    assert.ok(r1.includes('## k'));
+    assert.ok(r1.includes('v'));
+
+    // Section exists, new key
+    const r2 = upsertEntry(`prefix\n${BRIDGE_SECTION_START}\n## old\nval\n${BRIDGE_SECTION_END}\nsuffix`, 'new', 'val2');
+    assert.ok(r2.startsWith('prefix'), 'prefix preserved');
+    assert.ok(r2.includes('## old'), 'old key preserved');
+    assert.ok(r2.includes('## new'), 'new key added');
+    assert.ok(r2.endsWith('suffix'), 'suffix preserved');
+
+    // Section exists, update key
+    const r3 = upsertEntry(`x${BRIDGE_SECTION_START}\n## k\nold${BRIDGE_SECTION_END}y`, 'k', 'new');
+    assert.ok(r3.includes('## k\nnew'), 'value updated');
+    assert.ok(!r3.includes('old'), 'old value gone');
+    assert.ok(r3.startsWith('x'), 'prefix preserved');
+    assert.ok(r3.endsWith('y'), 'suffix preserved');
+  });
+
+  test('rebuildSection empty entries removes section', () => {
+    const content = `before\n${BRIDGE_SECTION_START}\n## k\nv\n${BRIDGE_SECTION_END}\nafter`;
+    const r = rebuildSection(content, []);
+    assert.ok(!r.includes(BRIDGE_SECTION_START));
+    assert.ok(r.includes('before'));
+    assert.ok(r.includes('after'));
+  });
+});
+
 // ── Permissions ──────────────────────────────────────────────
 
 describe('permissions', async () => {
