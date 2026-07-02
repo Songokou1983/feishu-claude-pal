@@ -28,6 +28,7 @@ import {
 } from './validators.js';
 import { formatRelativeTime } from './session-scanner.js';
 import { htmlToFeishuMarkdown, formatTokenCount } from './feishu-markdown.js';
+import { ClaudeMemory } from './claude-memory.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -387,6 +388,10 @@ async function handleCommand(
         '/tree [depth] [path] - Show project file tree (default 2, max 4)',
         '/diff [--staged] - Show git diff',
         '/cost - Show token usage & cost for current session',
+        '/remember <key> <value> - Persist a memory (bridges to ~/.claude/CLAUDE.md)',
+        '/recall [key] - View memories (or single key)',
+        '/forget <key> - Delete a memory',
+        '/memories - List all bridge-managed memories',
         '/status - Show current status',
         '/stop - Stop current session',
         '/perm allow|allow_session|deny <id> - Permission response',
@@ -635,6 +640,22 @@ async function handleCommand(
       response = cmdCost(ctx, msg.chatId, args);
       break;
 
+    case '/remember':
+      response = cmdRemember(args);
+      break;
+
+    case '/recall':
+      response = cmdRecall(args);
+      break;
+
+    case '/forget':
+      response = cmdForget(args);
+      break;
+
+    case '/memories':
+      response = cmdMemories();
+      break;
+
     default:
       response = `Unknown command: ${command}\nType /help for available commands.`;
   }
@@ -872,5 +893,85 @@ function cmdCost(ctx: AppContext, chatId: string, _args: string): string {
     const outPct = (summary.totalOutput / total * 100).toFixed(1);
     lines.push(`📈 Input / Output 占比: ${inPct}% / ${outPct}%`);
   }
+  return lines.join('\n');
+}
+
+// ── Memory commands (bridge-managed section in ~/.claude/CLAUDE.md) ──
+
+const memory = new ClaudeMemory();
+
+function cmdRemember(args: string): string {
+  const trimmed = args.trim();
+  if (!trimmed) {
+    return 'Usage: `/remember <key> <value>`\nExample: `/remember language 用中文回复`';
+  }
+  const spaceIdx = trimmed.indexOf(' ');
+  if (spaceIdx === -1) {
+    return 'Usage: `/remember <key> <value>`\n需要 key 和 value（用空格分隔）';
+  }
+  const key = trimmed.slice(0, spaceIdx).trim();
+  const value = trimmed.slice(spaceIdx + 1).trim();
+  if (!key || !value) {
+    return 'Usage: `/remember <key> <value>`\nkey 和 value 都不能为空';
+  }
+  if (key.includes('\n') || value.includes('\n')) {
+    return '❌ key 和 value 不能包含换行（多行 value 暂不支持）';
+  }
+  memory.setEntry(key, value);
+  return `✓ 已记住: \`${key}\` = ${value}\n\n(写入 \`~/.claude/CLAUDE.md\`，Claude 下次会自动加载)`;
+}
+
+function cmdRecall(args: string): string {
+  const key = args.trim();
+  if (key) {
+    const entries = memory.readEntries();
+    const entry = entries.find(e => e.key === key);
+    if (entry) {
+      return `**${entry.key}**\n${entry.value}`;
+    }
+    return `❌ 没找到: \`${key}\`\n\n用 \`/memories\` 看所有。`;
+  }
+  // No key → show all of CLAUDE.md (including CLI-managed content)
+  const all = memory.readAll();
+  if (!all) {
+    return '**(~/.claude/CLAUDE.md 是空的)**\n\n用 `/remember <key> <value>` 添加记忆';
+  }
+  // Truncate if huge
+  const maxLen = 4000;
+  const display = all.length > maxLen ? all.slice(0, maxLen) + `\n\n... (截断，共 ${all.length} 字符)` : all;
+  return `**~/.claude/CLAUDE.md 完整内容:**\n\n\`\`\`\n${display}\n\`\`\``;
+}
+
+function cmdForget(args: string): string {
+  const key = args.trim();
+  if (!key) {
+    return 'Usage: `/forget <key>`';
+  }
+  const removed = memory.removeEntry(key);
+  return removed
+    ? `✓ 已忘记: \`${key}\``
+    : `❌ 没找到: \`${key}\`\n\n用 \`/memories\` 看所有。`;
+}
+
+function cmdMemories(): string {
+  const entries = memory.readEntries();
+  if (entries.length === 0) {
+    return [
+      '**(暂无 bridge 管理的记忆)**',
+      '',
+      '用 `/remember <key> <value>` 添加，例如:',
+      '`/remember language 用中文回复`',
+      '`/remember style 简短直接`',
+      '',
+      '记忆会写入 `~/.claude/CLAUDE.md`，Claude 下次会自动加载。',
+    ].join('\n');
+  }
+  const lines = ['**Bridge 记忆** (写入 ~/.claude/CLAUDE.md):', ''];
+  for (const e of entries) {
+    const preview = e.value.length > 80 ? e.value.slice(0, 77) + '...' : e.value;
+    lines.push(`- \`${e.key}\`: ${preview}`);
+  }
+  lines.push('');
+  lines.push('**说明**: 这些只是 bridge 写的部分。CLI 的 /memory 命令可以写更多。');
   return lines.join('\n');
 }
