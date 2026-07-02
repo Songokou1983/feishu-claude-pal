@@ -532,3 +532,89 @@ describe('permissions', async () => {
     assert.equal(r2.behavior, 'deny');
   });
 });
+
+// ── Bridge: buildTree (B7 slash command) ────────────────────
+
+describe('bridge-buildTree', async () => {
+  const { buildTree } = await import('../bridge.js');
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+
+  let tmpDir: string;
+
+  test('buildTree returns empty string for maxDepth=0', () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'b7-tree-'));
+    assert.equal(buildTree(tmpDir, tmpDir, 0), '');
+  });
+
+  test('buildTree lists files and dirs, dirs get / suffix', () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'b7-tree-'));
+    fs.writeFileSync(path.join(tmpDir, 'README.md'), 'hi');
+    fs.mkdirSync(path.join(tmpDir, 'src'));
+    fs.writeFileSync(path.join(tmpDir, 'src', 'index.ts'), '');
+
+    const out = buildTree(tmpDir, tmpDir, 2);
+    assert.ok(out.includes('README.md'));
+    assert.ok(out.includes('src/'), 'dir should have / suffix');
+    assert.ok(out.includes('index.ts'), 'nested file should appear');
+  });
+
+  test('buildTree ignores node_modules, .git, dist, build', () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'b7-tree-'));
+    fs.writeFileSync(path.join(tmpDir, 'app.ts'), '');
+    fs.mkdirSync(path.join(tmpDir, 'node_modules'));
+    fs.writeFileSync(path.join(tmpDir, 'node_modules', 'junk.ts'), '');
+    fs.mkdirSync(path.join(tmpDir, '.git'));
+    fs.writeFileSync(path.join(tmpDir, '.git', 'HEAD'), '');
+    fs.mkdirSync(path.join(tmpDir, 'dist'));
+    fs.mkdirSync(path.join(tmpDir, 'build'));
+
+    const out = buildTree(tmpDir, tmpDir, 2);
+    assert.ok(out.includes('app.ts'));
+    assert.ok(!out.includes('node_modules'), 'should ignore node_modules');
+    assert.ok(!out.includes('.git'), 'should ignore .git');
+    assert.ok(!out.includes('dist'), 'should ignore dist');
+    assert.ok(!out.includes('build'), 'should ignore build');
+  });
+
+  test('buildTree respects depth limit', () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'b7-tree-'));
+    fs.mkdirSync(path.join(tmpDir, 'a'));
+    fs.mkdirSync(path.join(tmpDir, 'a', 'b'));
+    fs.mkdirSync(path.join(tmpDir, 'a', 'b', 'c'));
+    fs.writeFileSync(path.join(tmpDir, 'a', 'b', 'c', 'deep.ts'), '');
+
+    // depth=1: see 'a/' only
+    const depth1 = buildTree(tmpDir, tmpDir, 1);
+    assert.ok(depth1.includes('a/'));
+    assert.ok(!depth1.includes('deep.ts'), 'depth=1 should not see 3 levels deep');
+
+    // depth=3: see 'c/' but not deep.ts (depth=4 needed)
+    const depth3 = buildTree(tmpDir, tmpDir, 3);
+    assert.ok(depth3.includes('a/'));
+    assert.ok(depth3.includes('b/'));
+    assert.ok(depth3.includes('c/'));
+    assert.ok(!depth3.includes('deep.ts'));
+
+    // depth=4: see deep.ts
+    const depth4 = buildTree(tmpDir, tmpDir, 4);
+    assert.ok(depth4.includes('deep.ts'));
+  });
+
+  test('buildTree truncates at 30 entries per dir with hint', () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'b7-tree-'));
+    for (let i = 0; i < 40; i++) {
+      fs.writeFileSync(path.join(tmpDir, `file${i.toString().padStart(2, '0')}.ts`), '');
+    }
+
+    const out = buildTree(tmpDir, tmpDir, 1);
+    assert.ok(out.includes('...'), 'should show truncation hint');
+    assert.ok(out.includes('more'), 'hint should mention remaining count');
+  });
+
+  test('buildTree handles non-existent path gracefully', () => {
+    const out = buildTree('/nonexistent/path/xyz', '/nonexistent/path/xyz', 2);
+    assert.ok(out.includes('无法读取') || out.includes('ENOENT') || out.length > 0);
+  });
+});

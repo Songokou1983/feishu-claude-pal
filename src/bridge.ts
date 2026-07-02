@@ -28,6 +28,9 @@ import {
 } from './validators.js';
 import { formatRelativeTime } from './session-scanner.js';
 import { htmlToFeishuMarkdown } from './feishu-markdown.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 
 // ── /list cache (per-chat, 5 min TTL) ───────────────────────
 
@@ -380,6 +383,9 @@ async function handleCommand(
         '/cwd /path - Change working directory',
         '/mode plan|code|ask - Change mode',
         '/model minimax|glm - Switch API provider model',
+        '/models - Show available models & config status',
+        '/tree [depth] [path] - Show project file tree (default 2, max 4)',
+        '/diff [--staged] - Show git diff',
         '/status - Show current status',
         '/stop - Stop current session',
         '/perm allow|allow_session|deny <id> - Permission response',
@@ -612,6 +618,18 @@ async function handleCommand(
       break;
     }
 
+    case '/tree':
+      response = await cmdTree(ctx, msg.chatId, args);
+      break;
+
+    case '/diff':
+      response = await cmdDiff(ctx, msg.chatId, args);
+      break;
+
+    case '/models':
+      response = cmdModels(ctx, msg.chatId, args);
+      break;
+
     default:
       response = `Unknown command: ${command}\nType /help for available commands.`;
   }
@@ -622,4 +640,197 @@ async function handleCommand(
       replyToMessageId: msg.messageId,
     });
   }
+}
+
+// ── Slash command implementations ────────────────────────────
+
+const TREE_IGNORE = new Set([
+  'node_modules', '.git', '.svn', '.hg',
+  'dist', 'build', 'out', '.next', '.nuxt', '.cache', '.parcel-cache',
+  '__pycache__', '.pytest_cache', '.mypy_cache', '.ruff_cache',
+  'target', 'vendor', '.venv', 'venv', 'env',
+  '.DS_Store', 'Thumbs.db',
+  'coverage', '.nyc_output', '.turbo', '.vercel',
+  '.idea', '.vscode', '*.log', '*.lock', 'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml',
+]);
+const TREE_MAX_ENTRIES_PER_DIR = 30;
+const TREE_DEFAULT_DEPTH = 2;
+const TREE_MAX_DEPTH = 4;
+const DIFF_MAX_LENGTH = 4000;
+
+export function buildTree(
+  rootPath: string,
+  displayPath: string,
+  maxDepth: number,
+  currentDepth = 0,
+): string {
+  if (currentDepth >= maxDepth) return '';
+
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(rootPath, { withFileTypes: true });
+  } catch (err) {
+    return `  ⚠️  无法读取: ${err instanceof Error ? err.message : String(err)}\n`;
+  }
+
+  // Sort: dirs first, then files, alphabetical
+  entries.sort((a, b) => {
+    if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+
+  const visible = entries.filter((e) => !TREE_IGNORE.has(e.name));
+  const truncated = visible.length > TREE_MAX_ENTRIES_PER_DIR;
+  const shown = truncated ? visible.slice(0, TREE_MAX_ENTRIES_PER_DIR) : visible;
+
+  const prefix = '│   '.repeat(currentDepth);
+  const lines: string[] = [];
+
+  for (const entry of shown) {
+    const suffix = entry.isDirectory() ? '/' : '';
+    lines.push(`${prefix}├── ${entry.name}${suffix}`);
+    if (entry.isDirectory()) {
+      const childPath = path.join(rootPath, entry.name);
+      const subtree = buildTree(childPath, path.join(displayPath, entry.name), maxDepth, currentDepth + 1);
+      if (subtree) lines.push(subtree);
+    }
+  }
+
+  if (truncated) {
+    lines.push(`${prefix}└── ... (${visible.length - TREE_MAX_ENTRIES_PER_DIR} more, 用 /tree <depth> 调浅)`);
+  }
+
+  return lines.join('\n') + (lines.length > 0 ? '\n' : '');
+}
+
+async function cmdTree(ctx: AppContext, chatId: string, args: string): Promise<string> {
+  const binding = resolveBinding(ctx, chatId);
+  const cwd = binding.workingDirectory || ctx.config.defaultWorkDir || process.cwd();
+
+  // Parse args: <depth> [path]
+  let depth = TREE_DEFAULT_DEPTH;
+  let target = cwd;
+
+  const tokens = args.split(/\s+/).filter(Boolean);
+  for (const t of tokens) {
+    if (/^\d+$/.test(t)) {
+      depth = Math.max(1, Math.min(parseInt(t, 10), TREE_MAX_DEPTH));
+    } else {
+      const validated = validateWorkingDirectory(t);
+      if (!validated) {
+        return `Invalid path: \`${t}\`\nUsage: \`/tree [depth] [path]\`\n  depth: 1-${TREE_MAX_DEPTH} (default ${TREE_DEFAULT_DEPTH})\n  path:  absolute path (default: current CWD)`;
+      }
+      target = validated;
+    }
+  }
+
+  if (!fs.existsSync(target)) {
+    return `Path does not exist: \`${target}\``;
+  }
+
+  const stat = fs.statSync(target);
+  if (!stat.isDirectory()) {
+    return `Not a directory: \`${target}\``;
+  }
+
+  try {
+    const tree = buildTree(target, target, depth);
+    const totalEntries = tree.split('\n').filter(Boolean).length;
+    const header = `**Tree of \`${target}\`** (depth ${depth}, ${totalEntries} entries)`;
+    return tree ? `${header}\n\`\`\`\n${tree}\`\`\`` : `${header}\n\`(empty)\``;
+  } catch (err) {
+    return `Tree failed: ${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
+async function cmdDiff(ctx: AppContext, chatId: string, args: string): Promise<string> {
+  const binding = resolveBinding(ctx, chatId);
+  const cwd = binding.workingDirectory || process.cwd();
+
+  if (!fs.existsSync(cwd)) {
+    return `Working directory does not exist: \`${cwd}\``;
+  }
+
+  try {
+    // Check if git repo
+    execFileSync('git', ['rev-parse', '--git-dir'], {
+      cwd,
+      encoding: 'utf-8',
+      timeout: 5000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch {
+    return `Not a git repository: \`${cwd}\``;
+  }
+
+  // Get diff scope: empty = working tree, --staged = staged only
+  const staged = args.trim() === '--staged';
+  const diffArgs = staged ? ['diff', '--staged'] : ['diff'];
+
+  let stat: string;
+  let diff: string;
+  try {
+    stat = execFileSync('git', [...diffArgs, '--stat'], {
+      cwd, encoding: 'utf-8', timeout: 5000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim();
+    diff = execFileSync('git', diffArgs, {
+      cwd, encoding: 'utf-8', timeout: 10_000, maxBuffer: 2 * 1024 * 1024,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch (err) {
+    return `Git diff failed: ${err instanceof Error ? err.message : String(err)}`;
+  }
+
+  if (!diff.trim()) {
+    return staged
+      ? 'No staged changes.'
+      : 'No uncommitted changes.';
+  }
+
+  const lines: string[] = [];
+  lines.push(`**Git Diff** (\`${cwd}\`)${staged ? ' — staged' : ''}`);
+  if (stat) lines.push('', '```', stat, '```');
+  if (diff.length > DIFF_MAX_LENGTH) {
+    lines.push('', '```', diff.slice(0, DIFF_MAX_LENGTH), '```');
+    lines.push(`\n... truncated (${diff.length - DIFF_MAX_LENGTH} more chars). Use \`/diff --staged\` or run \`git diff\` locally.`);
+  } else {
+    lines.push('', '```', diff, '```');
+  }
+  return lines.join('\n');
+}
+
+function cmdModels(ctx: AppContext, _chatId: string, _args: string): string {
+  const config = ctx.config;
+  const binding = ctx.store.getChannelBinding(_chatId);
+
+  const providers: Array<{ key: string; label: string; configured: boolean; hint: string }> = [
+    {
+      key: 'minimax',
+      label: 'MiniMax (Claude Sonnet 4)',
+      configured: !!(config.minimaxBaseUrl && config.minimaxAuthToken),
+      hint: 'MINIMAX_BASE_URL + MINIMAX_AUTH_TOKEN',
+    },
+    {
+      key: 'glm-5.1',
+      label: 'GLM-5.1 (火山引擎 Ark)',
+      configured: !!(config.glmBaseUrl && config.glmApiKey),
+      hint: 'GLM_BASE_URL + GLM_API_KEY',
+    },
+  ];
+
+  const lines: string[] = ['**可用模型**', ''];
+  lines.push(`Default config: \`${config.defaultModel || '(跟随 CLI 默认)'}\``);
+  lines.push(`当前会话: \`${binding?.model || config.defaultModel || '(default)'}\``);
+  lines.push('');
+  lines.push('**第三方供应商:**');
+  for (const p of providers) {
+    const mark = p.configured ? '✅' : '⚠️ ';
+    const note = p.configured ? '' : ` (未配置, 需在 config.env 设 ${p.hint})`;
+    lines.push(`  ${mark} \`${p.key}\` — ${p.label}${note}`);
+  }
+  lines.push('');
+  lines.push('切换: `/model <key>`');
+  lines.push('查看完整 SDK session: `/status`');
+  return lines.join('\n');
 }
