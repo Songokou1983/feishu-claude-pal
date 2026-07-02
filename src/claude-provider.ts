@@ -34,7 +34,7 @@ export function buildSubprocessEnv(): Record<string, string> {
   return out;
 }
 
-// ── Auth error detection ──
+// ── Error classification ──
 
 const CLI_AUTH_PATTERNS = [
   /not logged in/i,
@@ -50,12 +50,77 @@ const API_AUTH_PATTERNS = [
   /401\b/,
 ];
 
+const RATE_LIMIT_PATTERNS = [
+  /\b429\b/,
+  /rate.?limit/i,
+  /too many requests/i,
+  /quota exceeded/i,
+];
+
+const NETWORK_PATTERNS = [
+  /ECONNREFUSED/,
+  /ECONNRESET/,
+  /ETIMEDOUT/,
+  /ENOTFOUND/,
+  /ENETUNREACH/,
+  /EAI_AGAIN/,
+  /socket hang up/i,
+  /\btimeout\b/i,
+  /\bnetwork\b/i,
+  /fetch failed/i,
+];
+
+const MODEL_NOT_FOUND_PATTERNS = [
+  /\b404\b.*\bmodel\b/i,
+  /model.*not.*found/i,
+  /unknown model/i,
+  /model.*does not exist/i,
+  /invalid model/i,
+];
+
+const CONTEXT_TOO_LONG_PATTERNS = [
+  /context.*length.*exceed/i,
+  /too many tokens/i,
+  /maximum context/i,
+  /prompt is too long/i,
+  /context_window_exceeded/i,
+  /\b413\b/,
+];
+
+const PERMISSION_DENIED_PATTERNS = [
+  /\b403\b/,
+  /permission.*denied/i,
+  /forbidden/i,
+  /not authorized/i,
+];
+
 export type AuthErrorKind = 'cli' | 'api' | false;
+export type ErrorKind =
+  | 'auth_cli'
+  | 'auth_api'
+  | 'rate_limit'
+  | 'network'
+  | 'model_not_found'
+  | 'context_too_long'
+  | 'permission_denied'
+  | 'unknown';
 
 export function classifyAuthError(text: string): AuthErrorKind {
   if (CLI_AUTH_PATTERNS.some(re => re.test(text))) return 'cli';
   if (API_AUTH_PATTERNS.some(re => re.test(text))) return 'api';
   return false;
+}
+
+/** Comprehensive error classifier. Replaces ad-hoc classifyAuthError() calls. */
+export function classifyError(text: string): ErrorKind {
+  if (CLI_AUTH_PATTERNS.some(re => re.test(text))) return 'auth_cli';
+  if (API_AUTH_PATTERNS.some(re => re.test(text))) return 'auth_api';
+  if (RATE_LIMIT_PATTERNS.some(re => re.test(text))) return 'rate_limit';
+  if (NETWORK_PATTERNS.some(re => re.test(text))) return 'network';
+  if (MODEL_NOT_FOUND_PATTERNS.some(re => re.test(text))) return 'model_not_found';
+  if (CONTEXT_TOO_LONG_PATTERNS.some(re => re.test(text))) return 'context_too_long';
+  if (PERMISSION_DENIED_PATTERNS.some(re => re.test(text))) return 'permission_denied';
+  return 'unknown';
 }
 
 const CLI_AUTH_USER_MESSAGE =
@@ -64,6 +129,51 @@ const CLI_AUTH_USER_MESSAGE =
 const API_AUTH_USER_MESSAGE =
   'API credential error. Check your ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN in config.env, ' +
   'or verify your organization has access to the requested model.';
+
+const RATE_LIMIT_USER_MESSAGE = (raw: string) =>
+  `**Rate limit hit** — 请求频率过高，请稍等几秒再试。\n\n` +
+  `原始错误: \`${raw.slice(0, 200)}\``;
+
+const NETWORK_USER_MESSAGE = (raw: string) =>
+  `**Network error** — 网络连接失败。\n\n` +
+  `可能原因:\n` +
+  `• 网络中断或代理失效\n` +
+  `• Base URL 不可达 (检查 ANTHROPIC_BASE_URL / MINIMAX_BASE_URL / GLM_BASE_URL)\n` +
+  `• DNS 解析失败\n\n` +
+  `原始错误: \`${raw.slice(0, 200)}\``;
+
+const MODEL_NOT_FOUND_USER_MESSAGE = (raw: string) =>
+  `**Model not found** — 模型名/Base URL 配错。\n\n` +
+  `检查:\n` +
+  `• \`/models\` 看当前已配供应商\n` +
+  `• config.env 里 MINIMAX_BASE_URL / GLM_BASE_URL 是否填对\n` +
+  `• \`/model <key>\` 切到正确的供应商\n\n` +
+  `原始错误: \`${raw.slice(0, 200)}\``;
+
+const CONTEXT_TOO_LONG_USER_MESSAGE = (raw: string) =>
+  `**Context too long** — 当前会话超出模型上下文窗口。\n\n` +
+  `建议:\n` +
+  `• \`/new\` 开新会话\n` +
+  `• 或把上下文压缩到几条关键消息\n\n` +
+  `原始错误: \`${raw.slice(0, 200)}\``;
+
+const PERMISSION_DENIED_USER_MESSAGE = (raw: string) =>
+  `**Permission denied** — API key 无权访问此模型或资源。\n\n` +
+  `检查 organization 是否开通了该模型访问权限，或换用 default 模型。\n\n` +
+  `原始错误: \`${raw.slice(0, 200)}\``;
+
+function getUserMessageForKind(kind: ErrorKind, raw: string): string {
+  switch (kind) {
+    case 'auth_cli': return CLI_AUTH_USER_MESSAGE;
+    case 'auth_api': return API_AUTH_USER_MESSAGE;
+    case 'rate_limit': return RATE_LIMIT_USER_MESSAGE(raw);
+    case 'network': return NETWORK_USER_MESSAGE(raw);
+    case 'model_not_found': return MODEL_NOT_FOUND_USER_MESSAGE(raw);
+    case 'context_too_long': return CONTEXT_TOO_LONG_USER_MESSAGE(raw);
+    case 'permission_denied': return PERMISSION_DENIED_USER_MESSAGE(raw);
+    default: return raw;
+  }
+}
 
 // ── Claude CLI path resolution ──
 
@@ -411,12 +521,12 @@ export class ClaudeProvider {
               return;
             }
 
-            const authKind = classifyAuthError(message) || classifyAuthError(stderrBuf);
+            const errorKind = classifyError(message) !== 'unknown'
+              ? classifyError(message)
+              : classifyError(stderrBuf);
             let userMessage: string;
-            if (authKind === 'cli') {
-              userMessage = CLI_AUTH_USER_MESSAGE;
-            } else if (authKind === 'api') {
-              userMessage = API_AUTH_USER_MESSAGE;
+            if (errorKind !== 'unknown') {
+              userMessage = getUserMessageForKind(errorKind, message);
             } else if (isTransportExit) {
               const stderrSummary = stderrBuf.trim();
               const lines = [message];

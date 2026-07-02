@@ -445,6 +445,7 @@ describe('delivery-chunking', async () => {
 describe('claude-provider', async () => {
   const {
     classifyAuthError,
+    classifyError,
     resolveClaudeCliPath,
     preflightCheck,
     buildSubprocessEnv,
@@ -463,6 +464,58 @@ describe('claude-provider', async () => {
 
   test('classifyAuthError returns false for normal text', () => {
     assert.equal(classifyAuthError('hello world'), false);
+  });
+
+  // B5: comprehensive error classification
+  test('classifyError detects rate_limit (429, too many requests)', () => {
+    assert.equal(classifyError('HTTP 429'), 'rate_limit');
+    assert.equal(classifyError('rate limit exceeded'), 'rate_limit');
+    assert.equal(classifyError('Too Many Requests'), 'rate_limit');
+    assert.equal(classifyError('quota exceeded for today'), 'rate_limit');
+  });
+
+  test('classifyError detects network errors (ECONNREFUSED, timeout, etc.)', () => {
+    assert.equal(classifyError('connect ECONNREFUSED 127.0.0.1:443'), 'network');
+    assert.equal(classifyError('connect ETIMEDOUT'), 'network');
+    assert.equal(classifyError('getaddrinfo ENOTFOUND api.example.com'), 'network');
+    assert.equal(classifyError('socket hang up'), 'network');
+    assert.equal(classifyError('request timeout'), 'network');
+    assert.equal(classifyError('fetch failed'), 'network');
+  });
+
+  test('classifyError detects model_not_found', () => {
+    assert.equal(classifyError('model claude-x-99 not found'), 'model_not_found');
+    assert.equal(classifyError('unknown model: glm-fake'), 'model_not_found');
+    assert.equal(classifyError('404 model not found'), 'model_not_found');
+  });
+
+  test('classifyError detects context_too_long', () => {
+    assert.equal(classifyError('context length exceeded'), 'context_too_long');
+    assert.equal(classifyError('too many tokens in conversation'), 'context_too_long');
+    assert.equal(classifyError('maximum context window reached'), 'context_too_long');
+    assert.equal(classifyError('HTTP 413 payload too large'), 'context_too_long');
+  });
+
+  test('classifyError detects permission_denied (403, forbidden)', () => {
+    assert.equal(classifyError('HTTP 403'), 'permission_denied');
+    assert.equal(classifyError('permission denied for resource'), 'permission_denied');
+    assert.equal(classifyError('forbidden'), 'permission_denied');
+  });
+
+  test('classifyError auth still works in new API', () => {
+    assert.equal(classifyError('not logged in'), 'auth_cli');
+    assert.equal(classifyError('invalid api key'), 'auth_api');
+  });
+
+  test('classifyError returns unknown for unrecognized errors', () => {
+    assert.equal(classifyError('some random error'), 'unknown');
+    assert.equal(classifyError('null'), 'unknown');
+    assert.equal(classifyError(''), 'unknown');
+  });
+
+  test('classifyError priority: auth before rate_limit (401 vs 429)', () => {
+    // Both patterns might match; auth is checked first so 401 wins
+    assert.equal(classifyError('401 unauthorized'), 'auth_api');
   });
 
   test('buildSubprocessEnv strips CLAUDECODE', () => {
