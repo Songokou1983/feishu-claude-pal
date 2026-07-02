@@ -377,6 +377,8 @@ export interface ClaudeProviderConfig {
   minimaxAuthToken?: string;
   glmBaseUrl?: string;
   glmApiKey?: string;
+  feishuAppId?: string;
+  feishuAppSecret?: string;
 }
 
 function isGlmModel(modelName: string): boolean {
@@ -418,6 +420,38 @@ function resolveModelForQuery(
   return modelName;
 }
 
+/**
+ * Build MCP server configs to attach to every Claude query.
+ * Currently wires up Feishu-MCP so Claude can read/write Feishu docs and
+ * browse Drive (tenant auth, modules=document,drive).
+ * See https://github.com/cso1z/Feishu-MCP
+ */
+interface McpStdioServer {
+  type: 'stdio';
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+}
+
+function buildMcpServers(config: ClaudeProviderConfig): Record<string, McpStdioServer> | undefined {
+  if (!config.feishuAppId || !config.feishuAppSecret) {
+    return undefined;
+  }
+  return {
+    feishu: {
+      type: 'stdio',
+      command: 'npx',
+      args: ['-y', 'feishu-mcp@latest', '--stdio'],
+      env: {
+        FEISHU_APP_ID: config.feishuAppId,
+        FEISHU_APP_SECRET: config.feishuAppSecret,
+        FEISHU_AUTH_TYPE: 'tenant',
+        FEISHU_ENABLED_MODULES: 'document,drive',
+      },
+    },
+  };
+}
+
 export class ClaudeProvider {
   constructor(
     private pendingPerms: PendingPermissions,
@@ -445,6 +479,7 @@ export class ClaudeProvider {
               cleanEnv,
             );
 
+            const mcpServers = buildMcpServers(config);
             const queryOptions: Record<string, unknown> = {
               cwd: params.workingDirectory,
               model,
@@ -453,6 +488,7 @@ export class ClaudeProvider {
               permissionMode: (params.permissionMode as 'default' | 'acceptEdits' | 'plan') || undefined,
               includePartialMessages: true,
               env: cleanEnv,
+              ...(mcpServers ? { mcpServers } : {}),
               stderr: (data: string) => {
                 stderrBuf += data;
                 if (stderrBuf.length > MAX_STDERR) {

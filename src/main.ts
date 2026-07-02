@@ -87,6 +87,8 @@ async function main(): Promise<void> {
       minimaxAuthToken: config.minimaxAuthToken,
       glmBaseUrl: config.glmBaseUrl,
       glmApiKey: config.glmApiKey,
+      feishuAppId: config.feishuAppId,
+      feishuAppSecret: config.feishuAppSecret,
     });
   const feishu = new FeishuClient(config);
 
