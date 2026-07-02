@@ -92,13 +92,6 @@ export function buildStreamingContent(text: string, tools: ToolCallInfo[], elaps
   return content || '💭 Thinking...';
 }
 
-export const LONG_CONTENT_INLINE_LIMIT = 1500;
-export const LONG_CONTENT_PREVIEW = 1200;
-
-export function shouldCollapseLongContent(text: string): boolean {
-  return text.length > LONG_CONTENT_INLINE_LIMIT;
-}
-
 export function buildFinalCardJson(
   text: string,
   tools: ToolCallInfo[],
@@ -113,42 +106,12 @@ export function buildFinalCardJson(
   }
 
   if (content) {
-    if (shouldCollapseLongContent(content)) {
-      // Split: preview (first LONG_CONTENT_PREVIEW chars) + collapsible panel with full content
-      const preview = content.slice(0, LONG_CONTENT_PREVIEW);
-      const remaining = content.length - LONG_CONTENT_PREVIEW;
-      elements.push({
-        tag: 'markdown',
-        content: `${preview}\n\n📖 _还有 ${remaining} 字，**点击下方展开完整回复** ↓_`,
-        text_align: 'left',
-        text_size: 'normal',
-      });
-      elements.push({
-        tag: 'collapsible_panel',
-        expanded: false,
-        header: {
-          title: {
-            tag: 'plain_text',
-            content: `🔽 点击展开完整回复 (${content.length} 字)`,
-          },
-        },
-        elements: [
-          {
-            tag: 'markdown',
-            content,
-            text_align: 'left',
-            text_size: 'normal',
-          },
-        ],
-      });
-    } else {
-      elements.push({
-        tag: 'markdown',
-        content,
-        text_align: 'left',
-        text_size: 'normal',
-      });
-    }
+    elements.push({
+      tag: 'markdown',
+      content,
+      text_align: 'left',
+      text_size: 'normal',
+    });
   }
 
   if (footer) {

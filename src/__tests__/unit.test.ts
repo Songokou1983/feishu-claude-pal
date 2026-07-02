@@ -243,51 +243,6 @@ describe('feishu-markdown', async () => {
     const content = buildStreamingContent('hello', [], 0);
     assert.ok(!content.includes('⏱'), 'should NOT include clock when elapsed=0');
   });
-
-  // B2-2: long content collapsible panel
-  test('buildFinalCardJson returns single markdown for short content', () => {
-    const json = buildFinalCardJson('short text', [], null);
-    const parsed = JSON.parse(json);
-    const mdElements = parsed.body.elements.filter((e: any) => e.tag === 'markdown');
-    assert.equal(mdElements.length, 1, 'should have 1 markdown element');
-    const collapsibleElements = parsed.body.elements.filter((e: any) => e.tag === 'collapsible_panel');
-    assert.equal(collapsibleElements.length, 0, 'should have NO collapsible_panel');
-  });
-
-  test('buildFinalCardJson collapses long content with preview + collapsible_panel', () => {
-    const longText = 'x'.repeat(2000);  // > LONG_CONTENT_INLINE_LIMIT (1500)
-    const json = buildFinalCardJson(longText, [], {
-      status: '✅ Completed',
-      elapsed: '1.0s',
-    });
-    const parsed = JSON.parse(json);
-    const collapsibleElements = parsed.body.elements.filter((e: any) => e.tag === 'collapsible_panel');
-
-    assert.equal(collapsibleElements.length, 1, 'should have 1 collapsible_panel');
-    assert.equal(collapsibleElements[0].expanded, false, 'collapsible should default to collapsed');
-    assert.ok(collapsibleElements[0].header?.title?.content?.includes('2000'), 'header should show total length');
-    assert.ok(collapsibleElements[0].header?.title?.content?.includes('🔽'), 'header should have prominent emoji');
-
-    // Full content should be inside collapsible_panel.elements[0].content
-    const nestedContent = collapsibleElements[0].elements?.[0]?.content;
-    assert.ok(nestedContent, 'collapsible should have nested elements');
-    assert.ok(nestedContent.length >= 2000, 'nested content should include full text (>= 2000 chars)');
-    assert.ok(nestedContent.startsWith('x'.repeat(100)), 'nested content should start with original text');
-
-    // Preview element (top-level markdown) should mention remaining + clear CTA
-    const topLevelMd = parsed.body.elements.find(
-      (e: any) => e.tag === 'markdown' && e.content?.includes('点击下方展开')
-    );
-    assert.ok(topLevelMd, 'should have a top-level preview markdown with explicit CTA');
-  });
-
-  test('buildFinalCardJson threshold is exactly 1500 chars', () => {
-    const exactly1500 = 'y'.repeat(1500);
-    const json = buildFinalCardJson(exactly1500, [], null);
-    const parsed = JSON.parse(json);
-    const collapsibleElements = parsed.body.elements.filter((e: any) => e.tag === 'collapsible_panel');
-    assert.equal(collapsibleElements.length, 0, 'exactly 1500 chars should NOT collapse (threshold is >1500)');
-  });
 });
 
 // ── Store ───────────────────────────────────────────────────
