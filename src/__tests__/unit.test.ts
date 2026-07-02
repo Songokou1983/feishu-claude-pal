@@ -217,6 +217,32 @@ describe('feishu-markdown', async () => {
     const columnSet = parsed.body.elements.find((e: any) => e.tag === 'column_set');
     assert.ok(columnSet, 'Should have column_set with buttons');
   });
+
+  // B2-1: realtime elapsed in streaming content
+  test('buildStreamingContent shows elapsed when provided', () => {
+    const content = buildStreamingContent('hello', [], 12_345);
+    assert.ok(content.includes('hello'), 'should include text');
+    assert.ok(content.includes('⏱'), 'should include clock emoji');
+    assert.ok(content.includes('12.3s'), 'should show formatted elapsed');
+  });
+
+  test('buildStreamingContent shows elapsed with thinking indicator', () => {
+    const content = buildStreamingContent('', [], 500);
+    assert.ok(content.includes('Thinking'), 'should show thinking');
+    assert.ok(content.includes('⏱'), 'should include clock');
+    assert.ok(content.includes('500ms'), 'should show ms when <1s');
+  });
+
+  test('buildStreamingContent omits elapsed when not provided (back-compat)', () => {
+    const content = buildStreamingContent('hello', []);
+    assert.ok(content.includes('hello'));
+    assert.ok(!content.includes('⏱'), 'should NOT include clock when no elapsed');
+  });
+
+  test('buildStreamingContent omits elapsed when 0', () => {
+    const content = buildStreamingContent('hello', [], 0);
+    assert.ok(!content.includes('⏱'), 'should NOT include clock when elapsed=0');
+  });
 });
 
 // ── Store ───────────────────────────────────────────────────

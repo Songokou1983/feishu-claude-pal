@@ -79,11 +79,15 @@ export function formatTokenCount(count: number): string {
   return `${Math.round(count / 1000)}K`;
 }
 
-export function buildStreamingContent(text: string, tools: ToolCallInfo[]): string {
+export function buildStreamingContent(text: string, tools: ToolCallInfo[], elapsedMs?: number): string {
   let content = text || '';
   const toolMd = buildToolProgressMarkdown(tools);
   if (toolMd) {
     content = content ? `${content}\n\n${toolMd}` : toolMd;
+  }
+  if (elapsedMs !== undefined && elapsedMs > 0) {
+    const elapsedLine = `\n\n⏱ _${formatElapsed(elapsedMs)}_`;
+    content = content ? `${content}${elapsedLine}` : `💭 Thinking...${elapsedLine}`;
   }
   return content || '💭 Thinking...';
 }

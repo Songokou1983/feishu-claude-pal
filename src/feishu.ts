@@ -411,7 +411,8 @@ export class FeishuClient {
     const state = this.activeCards.get(chatId);
     if (!state || !this.restClient) return;
 
-    const content = buildStreamingContent(state.pendingText || '', state.toolCalls);
+    const elapsedMs = Date.now() - state.startTime;
+    const content = buildStreamingContent(state.pendingText || '', state.toolCalls, elapsedMs);
     state.sequence++;
     const seq = state.sequence;
     const cardId = state.cardId;
