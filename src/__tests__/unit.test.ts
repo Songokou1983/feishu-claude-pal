@@ -266,6 +266,7 @@ describe('feishu-markdown', async () => {
     assert.equal(collapsibleElements.length, 1, 'should have 1 collapsible_panel');
     assert.equal(collapsibleElements[0].expanded, false, 'collapsible should default to collapsed');
     assert.ok(collapsibleElements[0].header?.title?.content?.includes('2000'), 'header should show total length');
+    assert.ok(collapsibleElements[0].header?.title?.content?.includes('🔽'), 'header should have prominent emoji');
 
     // Full content should be inside collapsible_panel.elements[0].content
     const nestedContent = collapsibleElements[0].elements?.[0]?.content;
@@ -273,11 +274,11 @@ describe('feishu-markdown', async () => {
     assert.ok(nestedContent.length >= 2000, 'nested content should include full text (>= 2000 chars)');
     assert.ok(nestedContent.startsWith('x'.repeat(100)), 'nested content should start with original text');
 
-    // Preview element (top-level markdown) should mention remaining
+    // Preview element (top-level markdown) should mention remaining + clear CTA
     const topLevelMd = parsed.body.elements.find(
-      (e: any) => e.tag === 'markdown' && e.content?.includes('more chars')
+      (e: any) => e.tag === 'markdown' && e.content?.includes('点击下方展开')
     );
-    assert.ok(topLevelMd, 'should have a top-level preview markdown mentioning remaining chars');
+    assert.ok(topLevelMd, 'should have a top-level preview markdown with explicit CTA');
   });
 
   test('buildFinalCardJson threshold is exactly 1500 chars', () => {

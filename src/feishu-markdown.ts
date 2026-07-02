@@ -119,7 +119,7 @@ export function buildFinalCardJson(
       const remaining = content.length - LONG_CONTENT_PREVIEW;
       elements.push({
         tag: 'markdown',
-        content: `${preview}\n\n... _(${remaining} more chars)_`,
+        content: `${preview}\n\n📖 _还有 ${remaining} 字，**点击下方展开完整回复** ↓_`,
         text_align: 'left',
         text_size: 'normal',
       });
@@ -129,7 +129,7 @@ export function buildFinalCardJson(
         header: {
           title: {
             tag: 'plain_text',
-            content: `▸ Show full response (${content.length} chars)`,
+            content: `🔽 点击展开完整回复 (${content.length} 字)`,
           },
         },
         elements: [
