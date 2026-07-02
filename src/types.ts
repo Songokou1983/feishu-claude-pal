@@ -104,6 +104,8 @@ export interface BridgeSession {
 export interface BridgeMessage {
   role: string;
   content: string;
+  /** Token usage for assistant messages (from SDK result event). */
+  usage?: TokenUsage;
 }
 
 /** Content block in an LLM response message. */

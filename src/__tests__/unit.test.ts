@@ -336,6 +336,64 @@ describe('store', async () => {
     assert.equal(messages[1].role, 'assistant');
   });
 
+  test('addMessage persists usage JSON when provided', () => {
+    const store = new JsonFileStore(config);
+    const session = store.createSession('test', '', undefined, '/tmp');
+
+    const usage = {
+      input_tokens: 100,
+      output_tokens: 50,
+      cache_read_input_tokens: 80,
+      cache_creation_input_tokens: 20,
+      cost_usd: 0.001,
+    };
+    store.addMessage(session.id, 'assistant', 'hi', JSON.stringify(usage));
+
+    const { messages } = store.getMessages(session.id);
+    assert.equal(messages[0].usage?.input_tokens, 100);
+    assert.equal(messages[0].usage?.output_tokens, 50);
+    assert.equal(messages[0].usage?.cost_usd, 0.001);
+  });
+
+  test('addMessage ignores malformed usage JSON', () => {
+    const store = new JsonFileStore(config);
+    const session = store.createSession('test', '', undefined, '/tmp');
+
+    store.addMessage(session.id, 'assistant', 'hi', 'not valid json {{{');
+
+    const { messages } = store.getMessages(session.id);
+    assert.equal(messages[0].usage, undefined, 'malformed usage should not crash');
+  });
+
+  test('getUsageSummary returns null when no assistant usage', () => {
+    const store = new JsonFileStore(config);
+    const session = store.createSession('test', '', undefined, '/tmp');
+
+    assert.equal(store.getUsageSummary(session.id), null, 'empty session should return null');
+
+    store.addMessage(session.id, 'user', 'hello');
+    assert.equal(store.getUsageSummary(session.id), null, 'only user msgs should not count');
+  });
+
+  test('getUsageSummary aggregates across multiple assistant messages', () => {
+    const store = new JsonFileStore(config);
+    const session = store.createSession('test', '', undefined, '/tmp');
+
+    const usage1 = { input_tokens: 100, output_tokens: 50, cache_read_input_tokens: 80, cost_usd: 0.001 };
+    const usage2 = { input_tokens: 200, output_tokens: 80, cache_creation_input_tokens: 30, cost_usd: 0.002 };
+    store.addMessage(session.id, 'assistant', 'msg1', JSON.stringify(usage1));
+    store.addMessage(session.id, 'assistant', 'msg2', JSON.stringify(usage2));
+
+    const s = store.getUsageSummary(session.id);
+    assert.ok(s);
+    assert.equal(s.messageCount, 2);
+    assert.equal(s.totalInput, 300);
+    assert.equal(s.totalOutput, 130);
+    assert.equal(s.totalCacheRead, 80);
+    assert.equal(s.totalCacheCreation, 30);
+    assert.equal(Math.abs(s.totalCostUsd - 0.003) < 0.0001, true);
+  });
+
   test('session lock acquire/release', () => {
     const store = new JsonFileStore(config);
     const ok1 = store.acquireSessionLock('sess-1', 'lock-a', 'bridge', 60);

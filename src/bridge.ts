@@ -27,7 +27,7 @@ import {
   validateMode,
 } from './validators.js';
 import { formatRelativeTime } from './session-scanner.js';
-import { htmlToFeishuMarkdown } from './feishu-markdown.js';
+import { htmlToFeishuMarkdown, formatTokenCount } from './feishu-markdown.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -386,6 +386,7 @@ async function handleCommand(
         '/models - Show available models & config status',
         '/tree [depth] [path] - Show project file tree (default 2, max 4)',
         '/diff [--staged] - Show git diff',
+        '/cost - Show token usage & cost for current session',
         '/status - Show current status',
         '/stop - Stop current session',
         '/perm allow|allow_session|deny <id> - Permission response',
@@ -630,6 +631,10 @@ async function handleCommand(
       response = cmdModels(ctx, msg.chatId, args);
       break;
 
+    case '/cost':
+      response = cmdCost(ctx, msg.chatId, args);
+      break;
+
     default:
       response = `Unknown command: ${command}\nType /help for available commands.`;
   }
@@ -832,5 +837,40 @@ function cmdModels(ctx: AppContext, _chatId: string, _args: string): string {
   lines.push('');
   lines.push('切换: `/model <key>`');
   lines.push('查看完整 SDK session: `/status`');
+  return lines.join('\n');
+}
+
+function cmdCost(ctx: AppContext, chatId: string, _args: string): string {
+  const binding = resolveBinding(ctx, chatId);
+  const summary = ctx.store.getUsageSummary(binding.codepilotSessionId);
+  if (!summary) {
+    return [
+      '**Token 用量**',
+      '',
+      '本会话还没有任何 token 用量数据（还没有 assistant 消息或 usage 还没记录）。',
+      '',
+      '**说明**:',
+      '• `/cost` 只统计当前 binding 关联的 session（`/status` 显示 SDK session）',
+      '• 用量数据从 SDK result 事件的 `usage` 字段聚合',
+      '• 如果你换了 `/new` / `/bind`，会切到新 session，统计从零开始',
+    ].join('\n');
+  }
+
+  const lines: string[] = ['**Token 用量** (本会话)', ''];
+  lines.push(`📊 消息数: ${summary.messageCount}`);
+  lines.push(`📥 Input: ${formatTokenCount(summary.totalInput)} tokens`);
+  lines.push(`📤 Output: ${formatTokenCount(summary.totalOutput)} tokens`);
+  if (summary.totalCacheRead > 0 || summary.totalCacheCreation > 0) {
+    const totalCache = summary.totalCacheRead + summary.totalCacheCreation;
+    lines.push(`⚡ Cache: ${formatTokenCount(totalCache)} tokens (read ${formatTokenCount(summary.totalCacheRead)} + write ${formatTokenCount(summary.totalCacheCreation)})`);
+  }
+  lines.push(`💵 Cost: $${summary.totalCostUsd.toFixed(4)}`);
+  lines.push('');
+  const total = summary.totalInput + summary.totalOutput;
+  if (total > 0) {
+    const inPct = (summary.totalInput / total * 100).toFixed(1);
+    const outPct = (summary.totalOutput / total * 100).toFixed(1);
+    lines.push(`📈 Input / Output 占比: ${inPct}% / ${outPct}%`);
+  }
   return lines.join('\n');
 }

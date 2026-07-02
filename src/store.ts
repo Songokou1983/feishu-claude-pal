@@ -237,9 +237,17 @@ export class JsonFileStore {
 
   // ── Messages ──
 
-  addMessage(sessionId: string, role: string, content: string, _usage?: string | null): void {
+  addMessage(sessionId: string, role: string, content: string, usage?: string | null): void {
     const msgs = this.loadMessages(sessionId);
-    msgs.push({ role, content });
+    const msg: BridgeMessage = { role, content };
+    if (usage) {
+      try {
+        msg.usage = JSON.parse(usage);
+      } catch {
+        // ignore malformed usage strings
+      }
+    }
+    msgs.push(msg);
     this.persistMessages(sessionId);
   }
 
@@ -249,6 +257,46 @@ export class JsonFileStore {
       return { messages: msgs.slice(-opts.limit) };
     }
     return { messages: [...msgs] };
+  }
+
+  /**
+   * Aggregate token usage across all assistant messages in a session.
+   * Returns null if the session has no usage data.
+   */
+  getUsageSummary(sessionId: string): {
+    messageCount: number;
+    totalInput: number;
+    totalOutput: number;
+    totalCacheRead: number;
+    totalCacheCreation: number;
+    totalCostUsd: number;
+  } | null {
+    const msgs = this.loadMessages(sessionId);
+    let count = 0;
+    let input = 0;
+    let output = 0;
+    let cacheRead = 0;
+    let cacheCreation = 0;
+    let cost = 0;
+    for (const m of msgs) {
+      if (m.role === 'assistant' && m.usage) {
+        count++;
+        input += m.usage.input_tokens ?? 0;
+        output += m.usage.output_tokens ?? 0;
+        cacheRead += m.usage.cache_read_input_tokens ?? 0;
+        cacheCreation += m.usage.cache_creation_input_tokens ?? 0;
+        cost += m.usage.cost_usd ?? 0;
+      }
+    }
+    if (count === 0) return null;
+    return {
+      messageCount: count,
+      totalInput: input,
+      totalOutput: output,
+      totalCacheRead: cacheRead,
+      totalCacheCreation: cacheCreation,
+      totalCostUsd: cost,
+    };
   }
 
   // ── Session Locking ──
