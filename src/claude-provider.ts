@@ -259,19 +259,65 @@ interface StreamState {
 
 // ── ClaudeProvider ──
 
-export class ClaudeProvider {
-  private cliPath: string | undefined;
-  private autoApprove: boolean;
+export interface ClaudeProviderConfig {
+  cliPath?: string;
+  autoApprove?: boolean;
+  defaultModel?: string;
+  minimaxBaseUrl?: string;
+  minimaxAuthToken?: string;
+  glmBaseUrl?: string;
+  glmApiKey?: string;
+}
 
-  constructor(private pendingPerms: PendingPermissions, cliPath?: string, autoApprove = false) {
-    this.cliPath = cliPath;
-    this.autoApprove = autoApprove;
+function isGlmModel(modelName: string): boolean {
+  return modelName === 'glm-5.1' || modelName.startsWith('glm');
+}
+
+/** Map bridge-side model alias to CLI model + inject provider env vars. */
+function resolveModelForQuery(
+  modelName: string | undefined,
+  config: ClaudeProviderConfig,
+  cleanEnv: Record<string, string>,
+): string | undefined {
+  if (!modelName) return undefined;
+
+  if (isGlmModel(modelName)) {
+    if (config.glmBaseUrl && config.glmApiKey) {
+      cleanEnv.ANTHROPIC_BASE_URL = config.glmBaseUrl;
+      cleanEnv.ANTHROPIC_AUTH_TOKEN = config.glmApiKey;
+      cleanEnv.ANTHROPIC_API_KEY = config.glmApiKey;
+      console.log(`[claude-provider] Using GLM provider (model: ${modelName})`);
+      return modelName;
+    }
+    console.warn('[claude-provider] GLM model selected but GLM_BASE_URL/GLM_API_KEY not configured');
+    return modelName;
   }
+
+  if (modelName === 'minimax') {
+    if (config.minimaxBaseUrl && config.minimaxAuthToken) {
+      cleanEnv.ANTHROPIC_BASE_URL = config.minimaxBaseUrl;
+      cleanEnv.ANTHROPIC_AUTH_TOKEN = config.minimaxAuthToken;
+      cleanEnv.ANTHROPIC_API_KEY = config.minimaxAuthToken;
+      console.log('[claude-provider] Using MiniMax provider');
+      return undefined;
+    }
+    console.warn('[claude-provider] MiniMax model selected but MINIMAX_* not configured');
+    return undefined;
+  }
+
+  return modelName;
+}
+
+export class ClaudeProvider {
+  constructor(
+    private pendingPerms: PendingPermissions,
+    private config: ClaudeProviderConfig,
+  ) {}
 
   streamChat(params: StreamChatParams): ReadableStream<string> {
     const pendingPerms = this.pendingPerms;
-    const cliPath = this.cliPath;
-    const autoApprove = this.autoApprove;
+    const config = this.config;
+    const autoApprove = config.autoApprove;
 
     return new ReadableStream({
       start(controller) {
@@ -283,12 +329,11 @@ export class ClaudeProvider {
           try {
             const cleanEnv = buildSubprocessEnv();
 
-            let model = params.model;
-            const passModel = !!process.env.CTI_DEFAULT_MODEL;
-            if (model && !passModel) {
-              console.log(`[claude-provider] Skipping model "${model}", using CLI default`);
-              model = undefined;
-            }
+            const model = resolveModelForQuery(
+              params.model || config.defaultModel,
+              config,
+              cleanEnv,
+            );
 
             const queryOptions: Record<string, unknown> = {
               cwd: params.workingDirectory,
@@ -330,8 +375,8 @@ export class ClaudeProvider {
                 };
               },
             };
-            if (cliPath) {
-              queryOptions.pathToClaudeCodeExecutable = cliPath;
+            if (config.cliPath) {
+              queryOptions.pathToClaudeCodeExecutable = config.cliPath;
             }
 
             const prompt = buildPrompt(params.prompt, params.files);

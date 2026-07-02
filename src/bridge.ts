@@ -379,6 +379,7 @@ async function handleCommand(
         '/resume <编号或ID> - Resume a CLI session',
         '/cwd /path - Change working directory',
         '/mode plan|code|ask - Change mode',
+        '/model minimax|glm - Switch API provider model',
         '/status - Show current status',
         '/stop - Stop current session',
         '/perm allow|allow_session|deny <id> - Permission response',
@@ -466,6 +467,30 @@ async function handleCommand(
       const binding = resolveBinding(ctx, msg.chatId);
       ctx.store.updateChannelBinding(binding.id, { mode: args as 'code' | 'plan' | 'ask' });
       response = `Mode set to **${args}**`;
+      break;
+    }
+
+    case '/model': {
+      const modelMap: Record<string, string> = {
+        minimax: 'minimax',
+        glm: 'glm-5.1',
+        'glm-5.1': 'glm-5.1',
+      };
+      const arg = args.toLowerCase().trim();
+      const resolved = modelMap[arg];
+      if (!resolved) {
+        response = [
+          '可用模型:',
+          '  `/model minimax` — MiniMax (Claude Sonnet 4)',
+          '  `/model glm`     — GLM-5.1 (火山引擎 Ark)',
+        ].join('\n');
+        break;
+      }
+      const binding = resolveBinding(ctx, msg.chatId);
+      ctx.store.updateChannelBinding(binding.id, { model: resolved });
+      response = resolved === 'minimax'
+        ? 'Model set to **MiniMax** (Claude Sonnet 4)'
+        : 'Model set to **GLM-5.1** (火山引擎 Ark)';
       break;
     }
 

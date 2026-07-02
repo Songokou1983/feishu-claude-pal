@@ -79,7 +79,15 @@ async function main(): Promise<void> {
   // Assemble AppContext
   const store = new JsonFileStore(config);
   const pendingPerms = new PendingPermissions();
-  const provider = new ClaudeProvider(pendingPerms, cliPath, config.autoApprove);
+  const provider = new ClaudeProvider(pendingPerms, {
+      cliPath,
+      autoApprove: config.autoApprove,
+      defaultModel: config.defaultModel,
+      minimaxBaseUrl: config.minimaxBaseUrl,
+      minimaxAuthToken: config.minimaxAuthToken,
+      glmBaseUrl: config.glmBaseUrl,
+      glmApiKey: config.glmApiKey,
+    });
   const feishu = new FeishuClient(config);
 
   const ctx: AppContext = {

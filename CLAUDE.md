@@ -45,9 +45,21 @@ CTI_FEISHU_REQUIRE_MENTION=true     # Require @bot in group chats
 # CTI_CLAUDE_CODE_EXECUTABLE=/path/to/claude  # Override CLI path
 
 # ── Third-party API provider (optional) ──
+# MiniMax (Claude Sonnet 4 compatible)
 # ANTHROPIC_API_KEY=your-key
-# ANTHROPIC_BASE_URL=https://your-provider.com/v1
-# ANTHROPIC_AUTH_TOKEN=your-auth-token
+# ANTHROPIC_BASE_URL=https://api.minimaxi.com/anthropic
+# ANTHROPIC_AUTH_TOKEN=your-key
+# MINIMAX_BASE_URL=https://api.minimaxi.com/anthropic
+# MINIMAX_AUTH_TOKEN=your-key
+
+# ── 模型选项 ──
+# 可用模型：minimax / glm-5.1
+# 通过 /model 命令切换
+# CTI_DEFAULT_MODEL=glm-5.1
+
+# ── 火山引擎 Ark (GLM) ──
+# GLM_BASE_URL=https://ark.cn-beijing.volces.com/api/coding  # 注意：不是 /api/coding/v1
+# GLM_API_KEY=your-ark-api-key
 ```
 
 ## Feishu App Setup

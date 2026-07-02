@@ -18,6 +18,10 @@ export interface Config {
   feishuAllowedUsers?: string[];
   feishuRequireMention: boolean;
   autoApprove: boolean;
+  minimaxBaseUrl?: string;
+  minimaxAuthToken?: string;
+  glmBaseUrl?: string;
+  glmApiKey?: string;
 }
 
 /**
@@ -76,5 +80,9 @@ export function loadConfig(): Config {
       ? env.get('CTI_FEISHU_REQUIRE_MENTION') !== 'false'
       : true,
     autoApprove: env.get('CTI_AUTO_APPROVE') === 'true',
+    minimaxBaseUrl: env.get('MINIMAX_BASE_URL') || undefined,
+    minimaxAuthToken: env.get('MINIMAX_AUTH_TOKEN') || undefined,
+    glmBaseUrl: env.get('GLM_BASE_URL') || undefined,
+    glmApiKey: env.get('GLM_API_KEY') || undefined,
   };
 }

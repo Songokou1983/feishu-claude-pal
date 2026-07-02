@@ -132,6 +132,7 @@ The main loop and command router:
 - **Multi-modal**: `buildPrompt()` converts text + image attachments into the SDK's content block format.
 - **Auth error classification**: `classifyAuthError()` detects CLI auth vs API auth errors and provides user-friendly messages.
 - **Environment isolation**: `buildSubprocessEnv()` strips `CLAUDECODE` env var to prevent recursive invocation.
+- **Multi-provider model support**: When `params.model` starts with `glm` or equals `glm-5.1`, injects `GLM_BASE_URL` + `GLM_API_KEY` into the subprocess env and passes the provider's model name to CLI. Falls back to MiniMax provider if `minimax` model is set. The Base URL for Volcano Ark must be `https://ark.cn-beijing.volces.com/api/coding` (Anthropic-compatible endpoint), not `/api/coding/v1`.
 
 ### `conversation.ts` (349 lines) — Conversation engine
 

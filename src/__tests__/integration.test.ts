@@ -27,7 +27,15 @@ before(async () => {
   store = new JsonFileStore(config);
   const permissions = new PendingPermissions();
   const cliPath = resolveClaudeCliPath();
-  const provider = new ClaudeProvider(permissions, cliPath, config.autoApprove);
+  const provider = new ClaudeProvider(permissions, {
+    cliPath,
+    autoApprove: config.autoApprove,
+    defaultModel: config.defaultModel,
+    minimaxBaseUrl: config.minimaxBaseUrl,
+    minimaxAuthToken: config.minimaxAuthToken,
+    glmBaseUrl: config.glmBaseUrl,
+    glmApiKey: config.glmApiKey,
+  });
   feishu = new FeishuClient(config);
   ctx = { config, store, provider, permissions, feishu };
 

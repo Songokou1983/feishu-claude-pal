@@ -11,6 +11,8 @@ await esbuild.build({
     // SDK must stay external — it spawns a CLI subprocess and resolves
     // dist/cli.js relative to its own package location.
     '@anthropic-ai/claude-agent-sdk',
+    // Lark SDK uses __dirname in a way incompatible with bundled ESM
+    '@larksuiteoapi/node-sdk',
     // Node.js built-ins
     'fs', 'path', 'os', 'crypto', 'http', 'https', 'net', 'tls',
     'stream', 'events', 'url', 'util', 'child_process', 'worker_threads',
