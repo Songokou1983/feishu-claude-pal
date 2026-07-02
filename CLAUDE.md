@@ -136,6 +136,29 @@ npx tsx --test src/__tests__/integration.test.ts   # 6 full integration tests
 | `claude` CLI not found | Install Claude Code CLI, or set `CTI_CLAUDE_CODE_EXECUTABLE` |
 | Card rendering fails | Add `cardkit:card` scope and republish |
 
+## ⚠️ Known Feishu Chat Limitations
+
+Confirmed 2026-07-02 after B2-2 experiment. **Read before adding any card UI feature**.
+
+### 1. `collapsible_panel` does NOT collapse in chat messages
+
+The Card 2.0 `collapsible_panel` element with `expanded: false` is **ignored by the chat rendering layer** — content is always shown expanded regardless of the field. User testing with a 9996-char Go tutorial showed the panel header (`▸ Show full response (X chars)`) but the full content was displayed inline.
+
+**Why**: The SDK type def (`@larksuiteoapi/node-sdk`) does not include `collapsible_panel`. WebFetch hint suggested it exists, but empirical testing shows the chat message renderer ignores the `expanded` flag. (The component may work in dashboard / standalone card contexts, but not in chat stream.)
+
+**Implication**: **Do not implement "long content folding" via `collapsible_panel` in chat messages.** Alternatives if you really need folding:
+- Truncate markdown content to 1500 chars + add "回复 /full 看完整" command (requires storing full content in store)
+- Split into multiple chat messages (each ≤ 30KB)
+- Accept that long messages render inline (current behavior)
+
+### 2. Markdown content has no automatic truncation
+
+Long markdown content in a single card element renders fully inline. Plan UX accordingly.
+
+### 3. `cardkit.v1.card.update` sequence counter
+
+Card updates require strictly monotonic `sequence` numbers. The current implementation increments on every flush — keep this invariant when modifying `feishu.ts` `flushCardUpdate` / `finalizeCard`.
+
 ## For Architecture & Implementation Details
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) — read that file before making code changes.
