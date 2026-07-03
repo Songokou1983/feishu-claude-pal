@@ -1,0 +1,55 @@
+version: "3.9"
+
+# Feishu Claude Pal — one-shot daemon
+#
+# Setup:
+#   1. Copy config.env.example to config.env, fill in CTI_FEISHU_APP_ID / SECRET
+#   2. docker compose build
+#   3. docker compose up -d
+#   4. docker compose logs -f
+#   5. curl http://localhost:18888/health
+#
+# Stop:
+#   docker compose down
+
+services:
+  feishu-claude-pal:
+    build: .
+    image: feishu-claude-pal:0.1.0
+    container_name: feishu-claude-pal
+    restart: unless-stopped
+
+    # Pass through env (override CTI_HEALTH_PORT etc here)
+    environment:
+      - NODE_ENV=production
+      - CTI_HEALTH_PORT=18888
+
+    # Mount config + persist runtime data + claude memory
+    volumes:
+      # Bridge config (must exist on host)
+      - ./config.env:/app/config.env:ro
+      # Runtime data (sessions, bindings, messages)
+      - bridge-data:/app/.bridge
+      # Claude Code CLI memory file (if you use /remember)
+      # Comment in if you want bridge to write to your host's CLAUDE.md
+      # - ${HOME}/.claude:/home/node/.claude:ro
+
+    ports:
+      - "127.0.0.1:18888:18888"  # health endpoint (localhost only)
+
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  bridge-data:
+    name: feishu-claude-pal-data

@@ -57,6 +57,36 @@ systemctl --user start feishu-bridge.service
 journalctl --user -u feishu-bridge.service -f
 ```
 
+### 4b. Docker (alternative)
+
+```bash
+# Build image
+docker compose build
+
+# Edit config.env with your Feishu app credentials
+cp config.env.example config.env
+$EDITOR config.env
+
+# Start daemon
+docker compose up -d
+
+# Logs
+docker compose logs -f
+
+# Health
+curl http://localhost:18888/health
+
+# Stop
+docker compose down
+```
+
+The `docker-compose.yml` mounts:
+- `config.env` (read-only) for credentials
+- `bridge-data` named volume for `.bridge/` runtime data (sessions, bindings)
+- exposes port 18888 to localhost only for the health endpoint
+
+Note: `/remember` writes to `~/.claude/CLAUDE.md` — Docker users will need to mount `~/.claude/` (commented in `docker-compose.yml`) to persist memories on the host.
+
 ### 5. Talk to your bot
 
 Send any message to the bot in Feishu. You'll get a streaming card with the response.
