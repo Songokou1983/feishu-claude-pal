@@ -1,5 +1,5 @@
 /**
- * Unit tests for feishu-claude-bridge-v2.
+ * Unit tests for feishu-claude-pal v0.1.0.
  * Tests pure-logic modules without requiring Feishu or Claude connections.
  */
 

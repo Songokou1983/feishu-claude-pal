@@ -20,7 +20,7 @@ for (const line of configContent.split('\n')) {
 
 export default {
   apps: [{
-    name: 'feishu-claude-bridge',
+    name: 'feishu-claude-pal',
     script: './dist/daemon.mjs',
     cwd: __dirname,
     env,
