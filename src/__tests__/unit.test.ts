@@ -945,3 +945,125 @@ describe('bridge-buildTree', async () => {
     assert.ok(out.includes('无法读取') || out.includes('ENOENT') || out.length > 0);
   });
 });
+
+// ── Health check server ──
+
+describe('health', async () => {
+  const { buildHealthResponse, startHealthServer, getListeningPort } = await import('../health.js');
+  const http = await import('node:http');
+
+  const baseState = () => {
+    const startedAt = new Date('2026-07-02T10:00:00Z');
+    return {
+      startedAt,
+      getWsState: () => 1,  // WebSocket.OPEN
+      isFeishuRunning: () => true,
+    };
+  };
+
+  test('buildHealthResponse reports ok when ws=OPEN and feishu running', () => {
+    const now = new Date('2026-07-02T10:00:30Z').getTime();
+    const r = buildHealthResponse(baseState(), now);
+    assert.equal(r.status, 'ok');
+    assert.equal(r.uptime_seconds, 30);
+    assert.equal(r.feishu_running, true);
+    assert.equal(r.ws_state, 'OPEN');
+    assert.equal(r.ws_state_code, 1);
+  });
+
+  test('buildHealthResponse reports degraded when ws=CLOSED', () => {
+    const state = { ...baseState(), getWsState: () => 3 };
+    const r = buildHealthResponse(state);
+    assert.equal(r.status, 'degraded');
+    assert.equal(r.ws_state, 'CLOSED');
+  });
+
+  test('buildHealthResponse reports degraded when feishu not running', () => {
+    const state = { ...baseState(), isFeishuRunning: () => false };
+    const r = buildHealthResponse(state);
+    assert.equal(r.status, 'degraded');
+    assert.equal(r.feishu_running, false);
+  });
+
+  test('buildHealthResponse handles all ws states', () => {
+    const states: Array<[number, string]> = [
+      [0, 'CONNECTING'],
+      [1, 'OPEN'],
+      [2, 'CLOSING'],
+      [3, 'CLOSED'],
+      [-1, 'UNKNOWN'],
+      [99, 'UNKNOWN'],
+    ];
+    for (const [code, label] of states) {
+      const r = buildHealthResponse({ ...baseState(), getWsState: () => code });
+      assert.equal(r.ws_state, label, `ws code ${code} should map to ${label}`);
+    }
+  });
+
+  test('buildHealthResponse uptime never negative', () => {
+    // start in the future (clock skew or NTP adjustment)
+    const future = new Date(Date.now() + 60_000);
+    const r = buildHealthResponse({ ...baseState(), startedAt: future });
+    assert.equal(r.uptime_seconds, 0, 'uptime clamped to 0 when start is in the future');
+  });
+
+  test('GET /health returns 200 with JSON when ok', async () => {
+    const server = startHealthServer(baseState(), 0);  // port 0 = OS-assigned
+    await new Promise<void>((resolve) => server.once('listening', () => resolve()));
+    const port = getListeningPort(server);
+    try {
+      const body = await new Promise<string>((resolve, reject) => {
+        const req = http.get(`http://127.0.0.1:${port}/health`, (res) => {
+          let chunks = '';
+          res.on('data', (c) => chunks += c);
+          res.on('end', () => resolve(chunks));
+        });
+        req.on('error', reject);
+      });
+      assert.ok(body.includes('"status": "ok"'));
+      assert.ok(body.includes('"uptime_seconds"'));
+      assert.ok(body.includes('"ws_state": "OPEN"'));
+    } finally {
+      server.close();
+    }
+  });
+
+  test('GET /health returns 503 when degraded', async () => {
+    const state = { ...baseState(), getWsState: () => 3 };  // CLOSED
+    const server = startHealthServer(state, 0);
+    await new Promise<void>((resolve) => server.once('listening', () => resolve()));
+    const port = getListeningPort(server);
+    try {
+      const { status, body } = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+        const req = http.get(`http://127.0.0.1:${port}/health`, (res) => {
+          let chunks = '';
+          res.on('data', (c) => chunks += c);
+          res.on('end', () => resolve({ status: res.statusCode || 0, body: chunks }));
+        });
+        req.on('error', reject);
+      });
+      assert.equal(status, 503);
+      assert.ok(body.includes('"status": "degraded"'));
+    } finally {
+      server.close();
+    }
+  });
+
+  test('GET /health/other returns 404', async () => {
+    const server = startHealthServer(baseState(), 0);
+    await new Promise<void>((resolve) => server.once('listening', () => resolve()));
+    const port = getListeningPort(server);
+    try {
+      const { status } = await new Promise<{ status: number }>((resolve, reject) => {
+        const req = http.get(`http://127.0.0.1:${port}/random-path`, (res) => {
+          res.resume();
+          res.on('end', () => resolve({ status: res.statusCode || 0 }));
+        });
+        req.on('error', reject);
+      });
+      assert.equal(status, 404);
+    } finally {
+      server.close();
+    }
+  });
+});

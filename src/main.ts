@@ -17,6 +17,7 @@ import { PendingPermissions } from './permissions.js';
 import { FeishuClient } from './feishu.js';
 import { setupLogger } from './logger.js';
 import { runBridgeLoop } from './bridge.js';
+import { startHealthServer } from './health.js';
 
 const RUNTIME_DIR = path.join(CTI_HOME, 'runtime');
 const STATUS_FILE = path.join(RUNTIME_DIR, 'status.json');
@@ -144,6 +145,21 @@ async function main(): Promise<void> {
 
   // Keep event loop alive
   setInterval(() => { /* keepalive */ }, 45_000);
+
+  // Health check HTTP server (opt-in via CTI_HEALTH_DISABLED=true)
+  if (process.env.CTI_HEALTH_DISABLED !== 'true') {
+    const healthPort = parseInt(process.env.CTI_HEALTH_PORT || '18888', 10);
+    const startedAt = new Date();
+    startHealthServer(
+      {
+        startedAt,
+        getWsState: () => feishu.getWsReadyState(),
+        isFeishuRunning: () => feishu.isRunning(),
+      },
+      healthPort,
+    );
+    console.log(`[feishu-bridge] Health server: http://127.0.0.1:${healthPort}/health`);
+  }
 
   // Watchdog: exit if WebSocket stays disconnected too long so launchd restarts us
   const HEALTH_CHECK_INTERVAL = 2 * 60 * 1000;
