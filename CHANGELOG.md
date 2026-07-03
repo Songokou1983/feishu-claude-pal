@@ -40,5 +40,5 @@ First release as `feishu-claude-pal`. Forked from [PI-33/feishu-claude-bridge](h
 
 - None (purely additive on top of upstream).
 
-[Unreleased]: https://github.com/your-name/feishu-claude-pal/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/your-name/feishu-claude-pal/releases/tag/v0.1.0
+[Unreleased]: https://github.com/Songokou1983/feishu-claude-pal/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Songokou1983/feishu-claude-pal/releases/tag/v0.1.0

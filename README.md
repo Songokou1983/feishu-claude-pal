@@ -1,5 +1,9 @@
 # feishu-claude-pal
 
+[![CI](https://github.com/Songokou1983/feishu-claude-pal/actions/workflows/test.yml/badge.svg)](https://github.com/Songokou1983/feishu-claude-pal/actions/workflows/test.yml)
+[![Release](https://img.shields.io/github/v/release/Songokou1983/feishu-claude-pal)](https://github.com/Songokou1983/feishu-claude-pal/releases)
+[![License: MIT](https://img.shields.io/github/license/Songokou1983/feishu-claude-pal)](./LICENSE)
+
 > Your personal AI assistant, living inside Feishu (Lark) and powered by Claude Code CLI.
 
 A fork of [PI-33/feishu-claude-bridge](https://github.com/PI-33/feishu-claude-bridge) focused on **personal-assistant use cases** — fewer platforms, more memory, more "knows you".
@@ -26,7 +30,7 @@ This fork is the opposite: **one user, one platform, deep integration with Claud
 ### 1. Install
 
 ```bash
-git clone https://github.com/your-name/feishu-claude-pal.git
+git clone https://github.com/Songokou1983/feishu-claude-pal.git
 cd feishu-claude-pal
 npm install
 npm run build
@@ -197,7 +201,7 @@ Persistent state: `~/.bridge/data/` (sessions, bindings, messages, audit log, de
 
 ```bash
 npm run typecheck    # tsc --noEmit
-npm test             # 90 unit tests
+npm test             # 99 unit tests
 npm run build        # esbuild bundle → dist/daemon.mjs
 ```
 
