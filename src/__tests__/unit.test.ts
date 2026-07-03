@@ -863,7 +863,7 @@ describe('permissions', async () => {
 // ── Bridge: buildTree (B7 slash command) ────────────────────
 
 describe('bridge-buildTree', async () => {
-  const { buildTree } = await import('../bridge.js');
+  const { buildTree } = await import('../bridge-commands.js');
   const fs = await import('node:fs');
   const os = await import('node:os');
   const path = await import('node:path');

@@ -4,15 +4,15 @@
  * Consumes inbound messages from FeishuClient, routes slash commands,
  * handles numeric permission shortcuts, and dispatches to the conversation engine.
  * Uses per-session locks for concurrency control.
+ *
+ * Architecture:
+ *   - bridge-helpers.ts: utility functions + module-level state
+ *     (list cache, session locks, active tasks, binding resolution, etc.)
+ *   - bridge-commands.ts: 8 slash command implementations
+ *   - bridge.ts (this file): main loop, message handler, command switch
  */
 
-import type {
-  AppContext,
-  InboundMessage,
-  ChannelBinding,
-  CliSessionInfo,
-  ToolCallInfo,
-} from './types.js';
+import type { AppContext, InboundMessage, ToolCallInfo, CliSessionInfo } from './types.js';
 import * as conversation from './conversation.js';
 import { deliver } from './delivery.js';
 import {
@@ -20,146 +20,33 @@ import {
   handlePermissionCallback,
 } from './permissions.js';
 import {
-  validateWorkingDirectory,
-  validateSessionId,
   isDangerousInput,
   sanitizeInput,
-  validateMode,
 } from './validators.js';
-import { formatRelativeTime } from './session-scanner.js';
-import { htmlToFeishuMarkdown, formatTokenCount } from './feishu-markdown.js';
-import { ClaudeMemory } from './claude-memory.js';
-import fs from 'node:fs';
-import path from 'node:path';
-import { execFileSync } from 'node:child_process';
-
-// ── /list cache (per-chat, 5 min TTL) ───────────────────────
-
-interface ListCacheEntry {
-  sessions: CliSessionInfo[];
-  cachedAt: number;
-}
-
-const LIST_CACHE_TTL = 5 * 60 * 1000;
-const listCache = new Map<string, ListCacheEntry>();
-
-function getCachedList(chatId: string): CliSessionInfo[] | null {
-  const entry = listCache.get(chatId);
-  if (!entry) return null;
-  if (Date.now() - entry.cachedAt > LIST_CACHE_TTL) {
-    listCache.delete(chatId);
-    return null;
-  }
-  return entry.sessions;
-}
-
-// ── Session locks ────────────────────────────────────────────
-
-const sessionLocks = new Map<string, Promise<void>>();
-
-function processWithSessionLock(sessionId: string, fn: () => Promise<void>): Promise<void> {
-  const prev = sessionLocks.get(sessionId) || Promise.resolve();
-  const current = prev.then(fn, fn);
-  sessionLocks.set(sessionId, current);
-  current.finally(() => {
-    if (sessionLocks.get(sessionId) === current) {
-      sessionLocks.delete(sessionId);
-    }
-  }).catch(() => {});
-  return current;
-}
-
-// ── Active tasks ─────────────────────────────────────────────
-
-const activeTasks = new Map<string, AbortController>();
-
-// ── Numeric permission shortcut check ────────────────────────
-
-function isNumericPermissionShortcut(ctx: AppContext, rawText: string, chatId: string): boolean {
-  const normalized = rawText.normalize('NFKC').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
-  if (!/^[123]$/.test(normalized)) return false;
-  const pending = ctx.store.listPendingPermissionLinksByChat(chatId);
-  return pending.length > 0;
-}
-
-// ── Resolve binding ──────────────────────────────────────────
-
-function resolveBinding(ctx: AppContext, chatId: string): ChannelBinding {
-  const existing = ctx.store.getChannelBinding(chatId);
-  if (existing) {
-    const session = ctx.store.getSession(existing.codepilotSessionId);
-    if (session) return existing;
-  }
-  return createNewBinding(ctx, chatId);
-}
-
-function createNewBinding(ctx: AppContext, chatId: string, workDir?: string): ChannelBinding {
-  const cwd = workDir || ctx.config.defaultWorkDir || process.env.HOME || '';
-  const model = ctx.config.defaultModel || '';
-  const session = ctx.store.createSession(`Bridge: ${chatId}`, model, undefined, cwd);
-  return ctx.store.upsertChannelBinding({
-    chatId,
-    codepilotSessionId: session.id,
-    workingDirectory: cwd,
-    model,
-  });
-}
-
-// ── SDK Session Update Logic ─────────────────────────────────
-
-function computeSdkSessionUpdate(
-  sdkSessionId: string | null | undefined,
-  hasError: boolean,
-): string | null {
-  if (sdkSessionId && !hasError) return sdkSessionId;
-  if (hasError) return '';
-  return null;
-}
-
-// ── CLI Session Helpers ──────────────────────────────────────
-
-function findCliSession(ctx: AppContext, query: string): CliSessionInfo | null {
-  const sessions = ctx.store.listCliSessions({ limit: 50 });
-  const q = query.toLowerCase();
-  const byId = sessions.find(s => s.sdkSessionId.toLowerCase().startsWith(q));
-  if (byId) return byId;
-  const bySlug = sessions.find(s => s.slug.toLowerCase() === q);
-  return bySlug || null;
-}
-
-function resumeCliSession(ctx: AppContext, chatId: string, target: CliSessionInfo): string {
-  const model = ctx.config.defaultModel || '';
-  const session = ctx.store.createSession(
-    `Resume: ${target.slug || target.sdkSessionId.slice(0, 8)}`,
-    model,
-    undefined,
-    target.cwd,
-  );
-
-  const binding = ctx.store.upsertChannelBinding({
-    chatId,
-    codepilotSessionId: session.id,
-    workingDirectory: target.cwd,
-    model,
-  });
-
-  ctx.store.updateChannelBinding(binding.id, { sdkSessionId: target.sdkSessionId });
-
-  const icon = target.isOpen ? '🟢' : '⚪';
-  const prompt = target.firstPrompt.length > 40 ? target.firstPrompt.slice(0, 40) + '...' : target.firstPrompt;
-  return [
-    `${icon} 已恢复 CLI 会话`,
-    '',
-    `Project: \`${target.project}\``,
-    `CWD: \`${target.cwd}\``,
-    target.slug ? `Slug: \`${target.slug}\`` : '',
-    `"${prompt}"`,
-    '',
-    `终端恢复: \`claude --resume ${target.sdkSessionId}\``,
-    '',
-    '现在可以直接发消息继续对话。',
-  ].filter(Boolean).join('\n');
-}
+import {
+  isNumericPermissionShortcut,
+  resolveBinding,
+  createNewBinding,
+  setActiveTask,
+  getActiveTask,
+  deleteActiveTask,
+  computeSdkSessionUpdate,
+  processWithSessionLock,
+  getCachedList,
+  setCachedList,
+  findCliSession,
+  resumeCliSession,
+} from './bridge-helpers.js';
+import {
+  cmdTree,
+  cmdDiff,
+  cmdModels,
+  cmdCost,
+  cmdRemember,
+  cmdRecall,
+  cmdForget,
+  cmdMemories,
+} from './bridge-commands.js';
 
 // ── Main loop ────────────────────────────────────────────────
 
@@ -208,7 +95,7 @@ async function handleMessage(ctx: AppContext, msg: InboundMessage): Promise<void
   if (!rawText && !hasAttachments) return;
 
   // Numeric shortcut for permission replies (1/2/3)
-  const normalized = rawText.normalize('NFKC').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
+  const normalized = rawText.normalize('NFKC').replace(/[​-‍﻿]/g, '').trim();
   if (/^[123]$/.test(normalized)) {
     const pendingLinks = ctx.store.listPendingPermissionLinksByChat(msg.chatId);
     if (pendingLinks.length === 1) {
@@ -254,7 +141,7 @@ async function handleMessage(ctx: AppContext, msg: InboundMessage): Promise<void
   ctx.feishu.onMessageStart(msg.chatId);
 
   const taskAbort = new AbortController();
-  activeTasks.set(binding.codepilotSessionId, taskAbort);
+  setActiveTask(binding.codepilotSessionId, taskAbort);
 
   // Tool call tracker for streaming card
   const toolCallTracker = new Map<string, ToolCallInfo>();
@@ -342,12 +229,12 @@ async function handleMessage(ctx: AppContext, msg: InboundMessage): Promise<void
         await ctx.feishu.onStreamEnd(msg.chatId, 'interrupted', '');
       } catch { /* best effort */ }
     }
-    activeTasks.delete(binding.codepilotSessionId);
+    deleteActiveTask(binding.codepilotSessionId);
     ctx.feishu.onMessageEnd(msg.chatId);
   }
 }
 
-// ── Slash commands ───────────────────────────────────────────
+// ── Slash command dispatcher ─────────────────────────────────
 
 export async function handleCommand(
   ctx: AppContext,
@@ -402,12 +289,14 @@ export async function handleCommand(
 
     case '/new': {
       const oldBinding = resolveBinding(ctx, msg.chatId);
-      const oldTask = activeTasks.get(oldBinding.codepilotSessionId);
+      const oldTask = getActiveTask(oldBinding.codepilotSessionId);
       if (oldTask) {
         oldTask.abort();
-        activeTasks.delete(oldBinding.codepilotSessionId);
+        deleteActiveTask(oldBinding.codepilotSessionId);
       }
-
+      // args parsing is done in /new case; we trust the upstream /new already parses workDir
+      // (kept minimal here for backward compat)
+      const { validateWorkingDirectory } = await import('./validators.js');
       let workDir: string | undefined;
       if (args) {
         const validated = validateWorkingDirectory(args);
@@ -431,6 +320,7 @@ export async function handleCommand(
         response = 'Usage: /bind <session_id>';
         break;
       }
+      const { validateSessionId } = await import('./validators.js');
       if (!validateSessionId(args)) {
         response = 'Invalid session ID format.';
         break;
@@ -460,6 +350,7 @@ export async function handleCommand(
         response = 'Usage: /cwd /path/to/directory';
         break;
       }
+      const { validateWorkingDirectory } = await import('./validators.js');
       const validatedPath = validateWorkingDirectory(args);
       if (!validatedPath) {
         response = 'Invalid path.';
@@ -472,6 +363,7 @@ export async function handleCommand(
     }
 
     case '/mode': {
+      const { validateMode } = await import('./validators.js');
       if (!validateMode(args)) {
         response = 'Usage: /mode plan|code|ask';
         break;
@@ -527,10 +419,10 @@ export async function handleCommand(
 
     case '/stop': {
       const binding = resolveBinding(ctx, msg.chatId);
-      const taskAbort = activeTasks.get(binding.codepilotSessionId);
+      const taskAbort = getActiveTask(binding.codepilotSessionId);
       if (taskAbort) {
         taskAbort.abort();
-        activeTasks.delete(binding.codepilotSessionId);
+        deleteActiveTask(binding.codepilotSessionId);
         response = 'Stopping current task...';
       } else {
         response = 'No task is currently running.';
@@ -555,12 +447,13 @@ export async function handleCommand(
     }
 
     case '/list': {
+      const { formatRelativeTime } = await import('./session-scanner.js');
       const sessions = ctx.store.listCliSessions({ limit: 20 });
       if (sessions.length === 0) {
         response = 'No local CLI sessions found.';
         break;
       }
-      listCache.set(msg.chatId, { sessions, cachedAt: Date.now() });
+      setCachedList(msg.chatId, sessions);
 
       const lines = ['**本地 CLI 会话:**', ''];
       for (let i = 0; i < sessions.length; i++) {
@@ -592,7 +485,7 @@ export async function handleCommand(
           target = cached[num - 1];
         } else {
           const freshSessions = ctx.store.listCliSessions({ limit: 20 });
-          listCache.set(msg.chatId, { sessions: freshSessions, cachedAt: Date.now() });
+          setCachedList(msg.chatId, freshSessions);
           if (num <= freshSessions.length) {
             target = freshSessions[num - 1];
           }
@@ -612,12 +505,11 @@ export async function handleCommand(
         break;
       }
 
-      // Abort running task
       const oldBinding = resolveBinding(ctx, msg.chatId);
-      const oldTask = activeTasks.get(oldBinding.codepilotSessionId);
+      const oldTask = getActiveTask(oldBinding.codepilotSessionId);
       if (oldTask) {
         oldTask.abort();
-        activeTasks.delete(oldBinding.codepilotSessionId);
+        deleteActiveTask(oldBinding.codepilotSessionId);
       }
 
       response = resumeCliSession(ctx, msg.chatId, target);
@@ -666,312 +558,4 @@ export async function handleCommand(
       replyToMessageId: msg.messageId,
     });
   }
-}
-
-// ── Slash command implementations ────────────────────────────
-
-const TREE_IGNORE = new Set([
-  'node_modules', '.git', '.svn', '.hg',
-  'dist', 'build', 'out', '.next', '.nuxt', '.cache', '.parcel-cache',
-  '__pycache__', '.pytest_cache', '.mypy_cache', '.ruff_cache',
-  'target', 'vendor', '.venv', 'venv', 'env',
-  '.DS_Store', 'Thumbs.db',
-  'coverage', '.nyc_output', '.turbo', '.vercel',
-  '.idea', '.vscode', '*.log', '*.lock', 'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml',
-]);
-const TREE_MAX_ENTRIES_PER_DIR = 30;
-const TREE_DEFAULT_DEPTH = 2;
-const TREE_MAX_DEPTH = 4;
-const DIFF_MAX_LENGTH = 4000;
-
-export function buildTree(
-  rootPath: string,
-  displayPath: string,
-  maxDepth: number,
-  currentDepth = 0,
-): string {
-  if (currentDepth >= maxDepth) return '';
-
-  let entries: fs.Dirent[];
-  try {
-    entries = fs.readdirSync(rootPath, { withFileTypes: true });
-  } catch (err) {
-    return `  ⚠️  无法读取: ${err instanceof Error ? err.message : String(err)}\n`;
-  }
-
-  // Sort: dirs first, then files, alphabetical
-  entries.sort((a, b) => {
-    if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1;
-    return a.name.localeCompare(b.name);
-  });
-
-  const visible = entries.filter((e) => !TREE_IGNORE.has(e.name));
-  const truncated = visible.length > TREE_MAX_ENTRIES_PER_DIR;
-  const shown = truncated ? visible.slice(0, TREE_MAX_ENTRIES_PER_DIR) : visible;
-
-  const prefix = '│   '.repeat(currentDepth);
-  const lines: string[] = [];
-
-  for (const entry of shown) {
-    const suffix = entry.isDirectory() ? '/' : '';
-    lines.push(`${prefix}├── ${entry.name}${suffix}`);
-    if (entry.isDirectory()) {
-      const childPath = path.join(rootPath, entry.name);
-      const subtree = buildTree(childPath, path.join(displayPath, entry.name), maxDepth, currentDepth + 1);
-      if (subtree) lines.push(subtree);
-    }
-  }
-
-  if (truncated) {
-    lines.push(`${prefix}└── ... (${visible.length - TREE_MAX_ENTRIES_PER_DIR} more, 用 /tree <depth> 调浅)`);
-  }
-
-  return lines.join('\n') + (lines.length > 0 ? '\n' : '');
-}
-
-async function cmdTree(ctx: AppContext, chatId: string, args: string): Promise<string> {
-  const binding = resolveBinding(ctx, chatId);
-  const cwd = binding.workingDirectory || ctx.config.defaultWorkDir || process.cwd();
-
-  // Parse args: <depth> [path]
-  let depth = TREE_DEFAULT_DEPTH;
-  let target = cwd;
-
-  const tokens = args.split(/\s+/).filter(Boolean);
-  for (const t of tokens) {
-    if (/^\d+$/.test(t)) {
-      depth = Math.max(1, Math.min(parseInt(t, 10), TREE_MAX_DEPTH));
-    } else {
-      const validated = validateWorkingDirectory(t);
-      if (!validated) {
-        return `Invalid path: \`${t}\`\nUsage: \`/tree [depth] [path]\`\n  depth: 1-${TREE_MAX_DEPTH} (default ${TREE_DEFAULT_DEPTH})\n  path:  absolute path (default: current CWD)`;
-      }
-      target = validated;
-    }
-  }
-
-  if (!fs.existsSync(target)) {
-    return `Path does not exist: \`${target}\``;
-  }
-
-  const stat = fs.statSync(target);
-  if (!stat.isDirectory()) {
-    return `Not a directory: \`${target}\``;
-  }
-
-  try {
-    const tree = buildTree(target, target, depth);
-    const totalEntries = tree.split('\n').filter(Boolean).length;
-    const header = `**Tree of \`${target}\`** (depth ${depth}, ${totalEntries} entries)`;
-    return tree ? `${header}\n\`\`\`\n${tree}\`\`\`` : `${header}\n\`(empty)\``;
-  } catch (err) {
-    return `Tree failed: ${err instanceof Error ? err.message : String(err)}`;
-  }
-}
-
-async function cmdDiff(ctx: AppContext, chatId: string, args: string): Promise<string> {
-  const binding = resolveBinding(ctx, chatId);
-  const cwd = binding.workingDirectory || process.cwd();
-
-  if (!fs.existsSync(cwd)) {
-    return `Working directory does not exist: \`${cwd}\``;
-  }
-
-  try {
-    // Check if git repo
-    execFileSync('git', ['rev-parse', '--git-dir'], {
-      cwd,
-      encoding: 'utf-8',
-      timeout: 5000,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-  } catch {
-    return `Not a git repository: \`${cwd}\``;
-  }
-
-  // Get diff scope: empty = working tree, --staged = staged only
-  const staged = args.trim() === '--staged';
-  const diffArgs = staged ? ['diff', '--staged'] : ['diff'];
-
-  let stat: string;
-  let diff: string;
-  try {
-    stat = execFileSync('git', [...diffArgs, '--stat'], {
-      cwd, encoding: 'utf-8', timeout: 5000,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    }).trim();
-    diff = execFileSync('git', diffArgs, {
-      cwd, encoding: 'utf-8', timeout: 10_000, maxBuffer: 2 * 1024 * 1024,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-  } catch (err) {
-    return `Git diff failed: ${err instanceof Error ? err.message : String(err)}`;
-  }
-
-  if (!diff.trim()) {
-    return staged
-      ? 'No staged changes.'
-      : 'No uncommitted changes.';
-  }
-
-  const lines: string[] = [];
-  lines.push(`**Git Diff** (\`${cwd}\`)${staged ? ' — staged' : ''}`);
-  if (stat) lines.push('', '```', stat, '```');
-  if (diff.length > DIFF_MAX_LENGTH) {
-    lines.push('', '```', diff.slice(0, DIFF_MAX_LENGTH), '```');
-    lines.push(`\n... truncated (${diff.length - DIFF_MAX_LENGTH} more chars). Use \`/diff --staged\` or run \`git diff\` locally.`);
-  } else {
-    lines.push('', '```', diff, '```');
-  }
-  return lines.join('\n');
-}
-
-function cmdModels(ctx: AppContext, _chatId: string, _args: string): string {
-  const config = ctx.config;
-  const binding = ctx.store.getChannelBinding(_chatId);
-
-  const providers: Array<{ key: string; label: string; configured: boolean; hint: string }> = [
-    {
-      key: 'minimax',
-      label: 'MiniMax (Claude Sonnet 4)',
-      configured: !!(config.minimaxBaseUrl && config.minimaxAuthToken),
-      hint: 'MINIMAX_BASE_URL + MINIMAX_AUTH_TOKEN',
-    },
-    {
-      key: 'glm-5.1',
-      label: 'GLM-5.1 (火山引擎 Ark)',
-      configured: !!(config.glmBaseUrl && config.glmApiKey),
-      hint: 'GLM_BASE_URL + GLM_API_KEY',
-    },
-  ];
-
-  const lines: string[] = ['**可用模型**', ''];
-  lines.push(`Default config: \`${config.defaultModel || '(跟随 CLI 默认)'}\``);
-  lines.push(`当前会话: \`${binding?.model || config.defaultModel || '(default)'}\``);
-  lines.push('');
-  lines.push('**第三方供应商:**');
-  for (const p of providers) {
-    const mark = p.configured ? '✅' : '⚠️ ';
-    const note = p.configured ? '' : ` (未配置, 需在 config.env 设 ${p.hint})`;
-    lines.push(`  ${mark} \`${p.key}\` — ${p.label}${note}`);
-  }
-  lines.push('');
-  lines.push('切换: `/model <key>`');
-  lines.push('查看完整 SDK session: `/status`');
-  return lines.join('\n');
-}
-
-function cmdCost(ctx: AppContext, chatId: string, _args: string): string {
-  const binding = resolveBinding(ctx, chatId);
-  const summary = ctx.store.getUsageSummary(binding.codepilotSessionId);
-  if (!summary) {
-    return [
-      '**Token 用量**',
-      '',
-      '本会话还没有任何 token 用量数据（还没有 assistant 消息或 usage 还没记录）。',
-      '',
-      '**说明**:',
-      '• `/cost` 只统计当前 binding 关联的 session（`/status` 显示 SDK session）',
-      '• 用量数据从 SDK result 事件的 `usage` 字段聚合',
-      '• 如果你换了 `/new` / `/bind`，会切到新 session，统计从零开始',
-    ].join('\n');
-  }
-
-  const lines: string[] = ['**Token 用量** (本会话)', ''];
-  lines.push(`📊 消息数: ${summary.messageCount}`);
-  lines.push(`📥 Input: ${formatTokenCount(summary.totalInput)} tokens`);
-  lines.push(`📤 Output: ${formatTokenCount(summary.totalOutput)} tokens`);
-  if (summary.totalCacheRead > 0 || summary.totalCacheCreation > 0) {
-    const totalCache = summary.totalCacheRead + summary.totalCacheCreation;
-    lines.push(`⚡ Cache: ${formatTokenCount(totalCache)} tokens (read ${formatTokenCount(summary.totalCacheRead)} + write ${formatTokenCount(summary.totalCacheCreation)})`);
-  }
-  lines.push(`💵 Cost: $${summary.totalCostUsd.toFixed(4)}`);
-  lines.push('');
-  const total = summary.totalInput + summary.totalOutput;
-  if (total > 0) {
-    const inPct = (summary.totalInput / total * 100).toFixed(1);
-    const outPct = (summary.totalOutput / total * 100).toFixed(1);
-    lines.push(`📈 Input / Output 占比: ${inPct}% / ${outPct}%`);
-  }
-  return lines.join('\n');
-}
-
-// ── Memory commands (bridge-managed section in ~/.claude/CLAUDE.md) ──
-
-const memory = new ClaudeMemory();
-
-function cmdRemember(args: string): string {
-  const trimmed = args.trim();
-  if (!trimmed) {
-    return 'Usage: `/remember <key> <value>`\nExample: `/remember language 用中文回复`';
-  }
-  const spaceIdx = trimmed.indexOf(' ');
-  if (spaceIdx === -1) {
-    return 'Usage: `/remember <key> <value>`\n需要 key 和 value（用空格分隔）';
-  }
-  const key = trimmed.slice(0, spaceIdx).trim();
-  const value = trimmed.slice(spaceIdx + 1).trim();
-  if (!key || !value) {
-    return 'Usage: `/remember <key> <value>`\nkey 和 value 都不能为空';
-  }
-  if (key.includes('\n') || value.includes('\n')) {
-    return '❌ key 和 value 不能包含换行（多行 value 暂不支持）';
-  }
-  memory.setEntry(key, value);
-  return `✓ 已记住: \`${key}\` = ${value}\n\n(写入 \`~/.claude/CLAUDE.md\`，Claude 下次会自动加载)`;
-}
-
-function cmdRecall(args: string): string {
-  const key = args.trim();
-  if (key) {
-    const entries = memory.readEntries();
-    const entry = entries.find(e => e.key === key);
-    if (entry) {
-      return `**${entry.key}**\n${entry.value}`;
-    }
-    return `❌ 没找到: \`${key}\`\n\n用 \`/memories\` 看所有。`;
-  }
-  // No key → show all of CLAUDE.md (including CLI-managed content)
-  const all = memory.readAll();
-  if (!all) {
-    return '**(~/.claude/CLAUDE.md 是空的)**\n\n用 `/remember <key> <value>` 添加记忆';
-  }
-  // Truncate if huge
-  const maxLen = 4000;
-  const display = all.length > maxLen ? all.slice(0, maxLen) + `\n\n... (截断，共 ${all.length} 字符)` : all;
-  return `**~/.claude/CLAUDE.md 完整内容:**\n\n\`\`\`\n${display}\n\`\`\``;
-}
-
-function cmdForget(args: string): string {
-  const key = args.trim();
-  if (!key) {
-    return 'Usage: `/forget <key>`';
-  }
-  const removed = memory.removeEntry(key);
-  return removed
-    ? `✓ 已忘记: \`${key}\``
-    : `❌ 没找到: \`${key}\`\n\n用 \`/memories\` 看所有。`;
-}
-
-function cmdMemories(): string {
-  const entries = memory.readEntries();
-  if (entries.length === 0) {
-    return [
-      '**(暂无 bridge 管理的记忆)**',
-      '',
-      '用 `/remember <key> <value>` 添加，例如:',
-      '`/remember language 用中文回复`',
-      '`/remember style 简短直接`',
-      '',
-      '记忆会写入 `~/.claude/CLAUDE.md`，Claude 下次会自动加载。',
-    ].join('\n');
-  }
-  const lines = ['**Bridge 记忆** (写入 ~/.claude/CLAUDE.md):', ''];
-  for (const e of entries) {
-    const preview = e.value.length > 80 ? e.value.slice(0, 77) + '...' : e.value;
-    lines.push(`- \`${e.key}\`: ${preview}`);
-  }
-  lines.push('');
-  lines.push('**说明**: 这些只是 bridge 写的部分。CLI 的 /memory 命令可以写更多。');
-  return lines.join('\n');
 }
