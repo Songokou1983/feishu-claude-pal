@@ -1,214 +1,183 @@
-# Feishu Claude Bridge
+# feishu-claude-pal
 
-将 [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI 会话桥接到飞书 / Lark，在手机或桌面飞书上与 Claude Code 实时对话。
+> Your personal AI assistant, living inside Feishu (Lark) and powered by Claude Code CLI.
 
-**核心特性：**
+A fork of [PI-33/feishu-claude-bridge](https://github.com/PI-33/feishu-claude-bridge) focused on **personal-assistant use cases** — fewer platforms, more memory, more "knows you".
 
-- **流式输出** — 使用 CardKit v2 流式卡片，逐字显示 Claude 回复
-- **完整 Claude Code 功能** — 读写文件、执行命令、搜索代码，所有工具调用在飞书内实时展示
-- **权限审批** — 危险操作（写文件、执行命令等）在飞书上弹出卡片按钮，点击批准或拒绝
-- **会话管理** — 创建新会话、恢复本地 CLI 会话、切换工作目录和模式
-- **群聊支持** — 每个群独立会话，@机器人 触发对话
+## Why this fork exists
 
-## 工作原理
+Most Claude + IM bridges (e.g. [lark-coding-agent-bridge](https://github.com/zarazhangrui/lark-coding-agent-bridge), [cc-connect](https://github.com/chenhg5/cc-connect)) are built as **general-purpose tools** — multi-platform, multi-agent, multi-user.
 
-```
-飞书 ──WebSocket──▶ FeishuClient ──▶ Bridge (命令路由)
-                                         │
-                                         ▼
-                                    Conversation
-                                         │
-                                         ▼
-                              Claude Agent SDK query()
-                                         │
-                                    SSE 流式响应
-                                         │
-                                         ▼
-                              CardKit v2 实时更新卡片
-```
+This fork is the opposite: **one user, one platform, deep integration with Claude Code CLI**. The bet is that a personal assistant should *know* its user, not just *serve* them.
 
-桥接作为后台守护进程运行，通过飞书 WebSocket 长连接接收消息，调用 Claude Code CLI（通过 Agent SDK）处理，并将结果以流式卡片的形式返回飞书。
+### What's different
 
-## 前置要求
+| Feature | This fork | Typical bridges |
+|---|---|---|
+| Feishu (Lark) only | ✅ | Multi-IM |
+| Claude Code CLI only | ✅ | Multi-agent |
+| **Private memory** (bridges to `~/.claude/CLAUDE.md`) | ✅ | ❌ |
+| **Feishu-MCP** (lets Claude call Feishu API: docs, drive) | ✅ | ❌ |
+| Multi-model (Claude + minimax + GLM-5.1) | ✅ | Claude only |
+| systemd service (Linux), launchd (macOS) | ✅ | ✅ |
 
-- **Node.js** >= 20
-- **Claude Code CLI** 已安装并登录（`claude --version` 可正常运行）
-- **飞书开发者应用**（需要以下权限和配置）
+## Quick start (5 minutes)
 
-### 飞书应用配置
-
-1. 前往 [飞书开放平台](https://open.feishu.cn/app) 创建企业自建应用
-2. 开启 **机器人** 能力
-3. 添加以下权限（Scopes）：
-   - `im:message` — 发送消息
-   - `im:message.receive_v1` — 接收消息
-   - `im:message:readonly` — 读取消息
-   - `im:resource` — 上传/下载资源
-   - `im:chat:readonly` — 读取群列表
-   - `im:message.reactions:write_only` — 添加表情回复（typing 指示器）
-   - `cardkit:card` — CardKit v2 卡片操作
-4. 在 **事件与回调** 中选择 **使用长连接接收事件**
-5. 订阅事件 `im.message.receive_v1`
-6. 发布应用版本
-
-## 安装
+### 1. Install
 
 ```bash
-git clone https://github.com/PI-33/feishu-claude-bridge.git
-cd feishu-claude-bridge
+git clone https://github.com/your-name/feishu-claude-pal.git
+cd feishu-claude-pal
 npm install
 npm run build
 ```
 
-## 配置
+### 2. Create a Feishu app
+
+1. Go to [Feishu Open Platform](https://open.feishu.cn/app) and create a new enterprise self-built app
+2. Enable **Bot** capability
+3. Subscribe to event `im.message.receive_v1` (WebSocket — no public IP needed)
+4. Add the scopes listed in `CLAUDE.md` § "Feishu-MCP"
+5. Publish a version and have an admin approve it
+
+### 3. Configure
 
 ```bash
-# 复制配置模板并编辑
 cp config.env.example config.env
+# Edit config.env with your CTI_FEISHU_APP_ID, CTI_FEISHU_APP_SECRET, and CTI_DEFAULT_WORKDIR
 ```
 
-编辑 `config.env`：
+### 4. Install systemd service (Linux)
 
 ```bash
-# 必填 —— 飞书应用凭证
-CTI_FEISHU_APP_ID=cli_xxxxxxxxxx
-CTI_FEISHU_APP_SECRET=xxxxxxxxxxxxxxxx
-
-# 必填 —— Claude Code 默认工作目录
-CTI_DEFAULT_WORKDIR=/path/to/your/project
-
-# 可选 —— 域名（feishu 或 lark）
-CTI_FEISHU_DOMAIN=feishu
-
-# 可选 —— 默认模式（code / plan / ask）
-CTI_DEFAULT_MODE=code
-
-# 可选 —— 群聊中是否需要 @机器人 才响应
-CTI_FEISHU_REQUIRE_MENTION=true
-
-# 可选 —— 限制允许使用的用户/群 ID（逗号分隔，留空=允许所有）
-# CTI_FEISHU_ALLOWED_USERS=ou_xxxx,oc_xxxx
-
-# 可选 —— 自动批准所有工具权限（仅在可信环境启用）
-# CTI_AUTO_APPROVE=true
-
-# 可选 —— 第三方 API 提供商
-# ANTHROPIC_API_KEY=your-key
-# ANTHROPIC_BASE_URL=https://your-provider.com/v1
+# Edit .config/systemd/user/feishu-bridge.service to match your install path
+systemctl --user daemon-reload
+systemctl --user enable feishu-bridge.service
+systemctl --user start feishu-bridge.service
+journalctl --user -u feishu-bridge.service -f
 ```
 
-## 启动
+### 5. Talk to your bot
 
-### 方式一：守护进程（macOS，推荐）
+Send any message to the bot in Feishu. You'll get a streaming card with the response.
 
-> `daemon.sh` 使用 macOS `launchd` 管理进程。Linux / Windows 用户请使用方式二，或自行配置 pm2、systemd 等进程管理器。
+## Commands
+
+| Command | What it does |
+|---|---|
+| `/help` | Show all commands |
+| `/status` | Current session status (model, CWD, SDK session ID) |
+| `/list` | Discover local CLI sessions |
+| `/resume <id>` | Resume a CLI session |
+| `/new [path]` | Start a new session |
+| `/cwd /path` | Change working directory |
+| `/mode plan\|code\|ask` | Switch Claude permission mode |
+| `/tree [depth] [path]` | Show project file tree |
+| `/diff [--staged]` | Show git diff |
+| `/models` | List available model providers |
+| `/cost` | Show token usage for current session |
+| `/remember <key> <value>` | Persist a memory (bridges to `~/.claude/CLAUDE.md`) |
+| `/recall [key]` | View memories or single key |
+| `/forget <key>` | Delete a memory |
+| `/memories` | List bridge-managed memories |
+| `/stop` | Stop the current task |
+| `/perm allow\|deny <id>` | Permission response |
+
+## Private memory
+
+The killer feature: `/remember` writes directly into your `~/.claude/CLAUDE.md` (which Claude Code CLI already auto-loads). No duplicate KV store, no conflict with CLI's own `/memory` — bridge-managed content is clearly marked:
+
+```markdown
+... (your existing content / CLI /memory output) ...
+
+<!-- BRIDGE_MEMORY_START -->
+
+## style
+简短直接
+
+## language
+中文回复
+
+<!-- BRIDGE_MEMORY_END -->
+```
+
+After `/remember style 简短直接`, the very next Claude query in Feishu (or terminal!) will respond in that style.
+
+## Feishu-MCP
+
+Lets Claude read/write Feishu documents and browse Drive from inside a Feishu chat. Powered by [cso1z/Feishu-MCP](https://github.com/cso1z/Feishu-MCP).
+
+Example:
+
+> "用 feishu 工具列出我能访问的所有飞书云文档"
+> "读飞书 wiki https://feishu.cn/wiki/abc123 并总结"
+
+See `CLAUDE.md` for required scopes and troubleshooting.
+
+## Configuration
+
+All config lives in `config.env`. Most important fields:
+
+| Variable | Purpose |
+|---|---|
+| `CTI_FEISHU_APP_ID` / `CTI_FEISHU_APP_SECRET` | Feishu app credentials |
+| `CTI_DEFAULT_WORKDIR` | Default CWD for new sessions |
+| `CTI_FEISHU_ALLOWED_USERS` | Comma-separated allowlist of open_ids (security) |
+| `CTI_AUTO_APPROVE` | `true` to auto-allow all tool calls (less safe) |
+| `MINIMAX_BASE_URL` / `MINIMAX_AUTH_TOKEN` | Enable `minimax` model provider |
+| `GLM_BASE_URL` / `GLM_API_KEY` | Enable `glm-5.1` model provider |
+
+See `config.env.example` for the full list.
+
+## Architecture
+
+```
+Feishu IM (mobile/desktop)
+        ↕  WebSocket (no public IP)
+  ┌─────────────────────────────────┐
+  │  daemon (Node.js + systemd)     │
+  │  ┌──────────┐  ┌─────────────┐  │
+  │  │ feishu.ts│  │  bridge.ts  │  │
+  │  │  WS +    │  │ /commands + │  │
+  │  │  CardKit │  │ message     │  │
+  │  │  v2      │  │ routing     │  │
+  │  └────┬─────┘  └──────┬──────┘  │
+  │       │               │         │
+  │  ┌────┴───────────────┴──────┐  │
+  │  │  claude-provider.ts       │  │
+  │  │  + Feishu-MCP server     │  │
+  │  └────────────┬──────────────┘  │
+  └───────────────┼─────────────────┘
+                  ↕  (SDK query() with mcpServers)
+         ┌────────────────────┐
+         │  Claude Code CLI    │
+         │  (with mcp config)  │
+         └────────────────────┘
+```
+
+Persistent state: `~/.bridge/data/` (sessions, bindings, messages, audit log, dedup).
+
+## Known limitations
+
+- **Claude Code CLI 2.1.159** is pinned (newer versions may block third-party LLM providers). See [CLAUDE.md](./CLAUDE.md) for details.
+- Feishu Card 2.0's `collapsible_panel` does NOT collapse in chat messages — long responses render inline.
+- No file lock on `~/.claude/CLAUDE.md` (single user, low concurrency; Phase 2).
+
+## Development
 
 ```bash
-# 启动（macOS 使用 launchd 管理，自动重启）
-bash scripts/daemon.sh start
-
-# 查看状态
-bash scripts/daemon.sh status
-
-# 查看日志
-bash scripts/daemon.sh logs
-
-# 停止
-bash scripts/daemon.sh stop
-```
-
-### 方式二：前台运行（跨平台）
-
-```bash
-# 开发模式（直接运行 TypeScript）
-npm run dev
-
-# 或使用构建后的产物运行
-npm start
-```
-
-启动后，在飞书中找到机器人发送任意消息即可开始对话。
-
-## 飞书内命令
-
-| 命令 | 说明 |
-|------|------|
-| `/help` | 显示帮助信息 |
-| `/new [工作目录]` | 创建新会话（可选指定工作目录） |
-| `/list` | 列出本地 Claude Code CLI 会话 |
-| `/resume <编号>` | 恢复 `/list` 中的某个会话 |
-| `/bind <会话ID>` | 绑定到指定的 SDK 会话 |
-| `/cwd <路径>` | 切换当前会话的工作目录 |
-| `/mode <code\|plan\|ask>` | 切换 Claude 模式 |
-| `/status` | 显示当前会话状态 |
-| `/stop` | 停止当前运行中的对话 |
-| `/perm` | 查看待处理的权限请求 |
-
-### 权限审批
-
-当 Claude Code 请求使用工具（如写文件、执行命令）时，飞书会弹出权限卡片：
-
-- **点击按钮** — 「允许一次」「允许本次会话」「拒绝」
-- **快捷回复** — 直接发送 `1`（允许一次）、`2`（允许本次会话）、`3`（拒绝）
-
-## 数据存储
-
-配置文件 `config.env` 位于项目根目录。所有运行时数据保存在项目目录下的 `.bridge/`：
-
-```
-.bridge/
-├── data/
-│   ├── sessions.json   # 会话记录
-│   ├── bindings.json   # 频道绑定
-│   ├── permissions.json # 权限链接
-│   └── messages/       # 消息历史（按会话ID分文件）
-├── logs/
-│   └── bridge.log      # 日志（自动轮转，最大 10MB）
-└── runtime/
-    ├── bridge.pid      # 进程 PID
-    └── status.json     # 运行状态
-```
-
-## 与本地 CLI 互通
-
-桥接创建的会话可以在终端 CLI 中恢复：
-
-```bash
-# 在飞书中使用 /status 获取 SDK Session ID
-# 然后在终端恢复
-claude --resume <sdk-session-id>
-```
-
-反过来，本地 CLI 会话也可以在飞书中恢复：
-
-```bash
-# 在飞书中发送 /list 查看本地会话
-# 发送 /resume 1 恢复第一个会话
-```
-
-## 项目结构
-
-```
-src/
-├── main.ts              # 入口：组装 AppContext、启动守护进程
-├── config.ts            # 配置加载（读取 config.env）
-├── types.ts             # 类型定义
-├── feishu.ts            # 飞书客户端：WebSocket + REST + CardKit v2
-├── bridge.ts            # 消息编排：命令路由 + 会话管理
-├── conversation.ts      # 对话引擎：SSE 流式处理
-├── claude-provider.ts   # Claude Agent SDK 封装
-├── permissions.ts       # 权限管理（阻塞式等待飞书审批）
-├── delivery.ts          # 消息发送：分块 + 限速 + 重试
-├── feishu-markdown.ts   # 飞书 Markdown / 卡片构建
-├── store.ts             # JSON 文件持久化
-├── session-scanner.ts   # 本地 CLI 会话发现
-├── validators.ts        # 输入校验
-└── logger.ts            # 日志（轮转 + 脱敏）
-scripts/
-├── daemon.sh            # 守护进程管理（macOS launchd）
-└── build.js             # esbuild 打包
+npm run typecheck    # tsc --noEmit
+npm test             # 90 unit tests
+npm run build        # esbuild bundle → dist/daemon.mjs
 ```
 
 ## License
 
-MIT
+MIT — see [LICENSE](./LICENSE). Forked from [PI-33/feishu-claude-bridge](https://github.com/PI-33/feishu-claude-bridge) (MIT).
+
+## Credits
+
+- [PI-33/feishu-claude-bridge](https://github.com/PI-33/feishu-claude-bridge) — the original bridge
+- [cso1z/Feishu-MCP](https://github.com/cso1z/Feishu-MCP) — Feishu MCP server
+- [@larksuiteoapi/node-sdk](https://www.npmjs.com/package/@larksuiteoapi/node-sdk) — Feishu SDK
+- [@anthropic-ai/claude-agent-sdk](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk) — Claude Code SDK
