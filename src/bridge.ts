@@ -349,7 +349,7 @@ async function handleMessage(ctx: AppContext, msg: InboundMessage): Promise<void
 
 // ── Slash commands ───────────────────────────────────────────
 
-async function handleCommand(
+export async function handleCommand(
   ctx: AppContext,
   msg: InboundMessage,
   text: string,
