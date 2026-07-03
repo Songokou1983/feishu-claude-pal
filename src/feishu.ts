@@ -1,93 +1,43 @@
 /**
- * Feishu Client — WebSocket event subscription + REST message sending.
+ * FeishuClient — WebSocket event subscription + REST message sending.
  *
  * Uses @larksuiteoapi/node-sdk WSClient for real-time events and REST Client
  * for message operations. Renders responses via CardKit v2 streaming cards
  * with 3-layer send degradation (card → post → text).
+ *
+ * Architecture:
+ *   - feishu-types.ts: types + constants
+ *   - feishu-card.ts: CardManager (streaming card lifecycle)
+ *   - feishu.ts (this file): main client — WS lifecycle, message queue,
+ *     incoming event handling, sending
  *
  * Card action callbacks require a WSClient monkey-patch because the SDK's
  * WSClient only handles type="event" messages; card callbacks arrive as
  * type="card" and would be silently dropped without the patch.
  */
 
-import crypto from 'node:crypto';
 import * as lark from '@larksuiteoapi/node-sdk';
-import type {
-  InboundMessage,
-  FileAttachment,
-  ToolCallInfo,
-  TokenUsage,
-  AppContext,
-} from './types.js';
+import type { InboundMessage, FileAttachment, TokenUsage, ToolCallInfo, AppContext } from './types.js';
 import {
   htmlToFeishuMarkdown,
   preprocessFeishuMarkdown,
   hasComplexMarkdown,
   buildCardContent,
   buildPostContent,
-  buildStreamingContent,
-  buildFinalCardJson,
   buildPermissionButtonCard,
-  formatElapsed,
-  formatTokenCount,
 } from './feishu-markdown.js';
+import {
+  DEDUP_MAX,
+  TYPING_EMOJI,
+  MAX_FILE_SIZE,
+  MIME_BY_TYPE,
+  type CardState,
+  type FeishuMessageEventData,
+  type SendResult,
+} from './feishu-types.js';
+import { FeishuCardManager } from './feishu-card.js';
 
-const DEDUP_MAX = 1000;
-const MAX_FILE_SIZE = 20 * 1024 * 1024;
-const TYPING_EMOJI = 'Typing';
-const CARD_THROTTLE_MS = 200;
-
-/** State for an active CardKit v2 streaming card. */
-interface CardState {
-  cardId: string;
-  messageId: string;
-  sequence: number;
-  startTime: number;
-  toolCalls: ToolCallInfo[];
-  thinking: boolean;
-  pendingText: string | null;
-  lastUpdateAt: number;
-  throttleTimer: ReturnType<typeof setTimeout> | null;
-}
-
-type FeishuMessageEventData = {
-  sender: {
-    sender_id?: {
-      open_id?: string;
-      union_id?: string;
-      user_id?: string;
-    };
-    sender_type: string;
-    tenant_key?: string;
-  };
-  message: {
-    message_id: string;
-    chat_id: string;
-    chat_type: string;
-    message_type: string;
-    content: string;
-    create_time: string;
-    mentions?: Array<{
-      key: string;
-      id: { open_id?: string; union_id?: string; user_id?: string };
-      name: string;
-    }>;
-  };
-};
-
-const MIME_BY_TYPE: Record<string, string> = {
-  image: 'image/png',
-  file: 'application/octet-stream',
-  audio: 'audio/ogg',
-  video: 'video/mp4',
-  media: 'application/octet-stream',
-};
-
-export interface SendResult {
-  ok: boolean;
-  messageId?: string;
-  error?: string;
-}
+export type { SendResult } from './feishu-types.js';
 
 export class FeishuClient {
   private config: AppContext['config'];
@@ -101,11 +51,13 @@ export class FeishuClient {
   private botIds = new Set<string>();
   private lastIncomingMessageId = new Map<string, string>();
   private typingReactions = new Map<string, string>();
-  private activeCards = new Map<string, CardState>();
-  private cardCreatePromises = new Map<string, Promise<boolean>>();
+  private cardManager: FeishuCardManager;
 
   constructor(config: AppContext['config']) {
     this.config = config;
+    this.cardManager = new FeishuCardManager({
+      getRestClient: () => this.restClient,
+    });
   }
 
   // ── Lifecycle ───────────────────────────────────────────────
@@ -189,11 +141,7 @@ export class FeishuClient {
     }
     this.waiters = [];
 
-    for (const [, state] of this.activeCards) {
-      if (state.throttleTimer) clearTimeout(state.throttleTimer);
-    }
-    this.activeCards.clear();
-    this.cardCreatePromises.clear();
+    this.cardManager.clearAll();
     this.seenMessageIds.clear();
     this.lastIncomingMessageId.clear();
     this.typingReactions.clear();
@@ -230,7 +178,7 @@ export class FeishuClient {
   onMessageStart(chatId: string): void {
     const messageId = this.lastIncomingMessageId.get(chatId);
     if (messageId) {
-      this.createStreamingCard(chatId, messageId).catch(() => {});
+      this.cardManager.createStreamingCard(chatId, messageId).catch(() => {});
     }
     if (!messageId || !this.restClient) return;
     this.restClient.im.messageReaction.create({
@@ -250,7 +198,7 @@ export class FeishuClient {
   }
 
   onMessageEnd(chatId: string): void {
-    this.cleanupCard(chatId);
+    this.cardManager.cleanupCard(chatId);
     const reactionId = this.typingReactions.get(chatId);
     const messageId = this.lastIncomingMessageId.get(chatId);
     if (!reactionId || !messageId || !this.restClient) return;
@@ -292,261 +240,21 @@ export class FeishuClient {
     }
   }
 
-  // ── Streaming Card (CardKit v2) ────────────────────────────
-
-  private createStreamingCard(chatId: string, replyToMessageId?: string): Promise<boolean> {
-    if (!this.restClient || this.activeCards.has(chatId)) return Promise.resolve(false);
-    const existing = this.cardCreatePromises.get(chatId);
-    if (existing) return existing;
-
-    const promise = this._doCreateStreamingCard(chatId, replyToMessageId);
-    this.cardCreatePromises.set(chatId, promise);
-    promise.finally(() => this.cardCreatePromises.delete(chatId));
-    return promise;
-  }
-
-  private async _doCreateStreamingCard(chatId: string, replyToMessageId?: string): Promise<boolean> {
-    if (!this.restClient) return false;
-
-    try {
-      const cardBody = {
-        schema: '2.0',
-        config: {
-          streaming_mode: true,
-          wide_screen_mode: true,
-          summary: { content: '思考中...' },
-        },
-        body: {
-          elements: [{
-            tag: 'markdown',
-            content: '💭 Thinking...',
-            text_align: 'left',
-            text_size: 'normal',
-            element_id: 'streaming_content',
-          }],
-        },
-      };
-
-      const createResp = await (this.restClient as any).cardkit.v1.card.create({
-        data: { type: 'card_json', data: JSON.stringify(cardBody) },
-      });
-      const cardId = createResp?.data?.card_id;
-      if (!cardId) {
-        console.warn('[feishu] Card create returned no card_id');
-        return false;
-      }
-
-      const cardContent = JSON.stringify({ type: 'card', data: { card_id: cardId } });
-      let msgResp;
-      if (replyToMessageId) {
-        msgResp = await this.restClient.im.message.reply({
-          path: { message_id: replyToMessageId },
-          data: { content: cardContent, msg_type: 'interactive' },
-        });
-      } else {
-        msgResp = await this.restClient.im.message.create({
-          params: { receive_id_type: 'chat_id' },
-          data: {
-            receive_id: chatId,
-            msg_type: 'interactive',
-            content: cardContent,
-          },
-        });
-      }
-
-      const messageId = msgResp?.data?.message_id;
-      if (!messageId) {
-        console.warn('[feishu] Card message send returned no message_id');
-        return false;
-      }
-
-      this.activeCards.set(chatId, {
-        cardId,
-        messageId,
-        sequence: 0,
-        startTime: Date.now(),
-        toolCalls: [],
-        thinking: true,
-        pendingText: null,
-        lastUpdateAt: 0,
-        throttleTimer: null,
-      });
-
-      console.log(`[feishu] Streaming card created: cardId=${cardId}, msgId=${messageId}`);
-      return true;
-    } catch (err) {
-      console.warn('[feishu] Failed to create streaming card:', err instanceof Error ? err.message : err);
-      return false;
-    }
-  }
-
-  private updateCardContent(chatId: string, text: string): void {
-    const state = this.activeCards.get(chatId);
-    if (!state || !this.restClient) return;
-
-    if (state.thinking && text.trim()) {
-      state.thinking = false;
-    }
-    state.pendingText = text;
-
-    const elapsed = Date.now() - state.lastUpdateAt;
-    if (elapsed < CARD_THROTTLE_MS && state.lastUpdateAt > 0) {
-      if (!state.throttleTimer) {
-        state.throttleTimer = setTimeout(() => {
-          state.throttleTimer = null;
-          this.flushCardUpdate(chatId);
-        }, CARD_THROTTLE_MS - elapsed);
-      }
-      return;
-    }
-
-    if (state.throttleTimer) {
-      clearTimeout(state.throttleTimer);
-      state.throttleTimer = null;
-    }
-    this.flushCardUpdate(chatId);
-  }
-
-  private flushCardUpdate(chatId: string): void {
-    const state = this.activeCards.get(chatId);
-    if (!state || !this.restClient) return;
-
-    const elapsedMs = Date.now() - state.startTime;
-    const content = buildStreamingContent(state.pendingText || '', state.toolCalls, elapsedMs);
-    state.sequence++;
-    const seq = state.sequence;
-    const cardId = state.cardId;
-
-    (this.restClient as any).cardkit.v1.cardElement.content({
-      path: { card_id: cardId, element_id: 'streaming_content' },
-      data: { content, sequence: seq },
-    }).then(() => {
-      state.lastUpdateAt = Date.now();
-    }).catch((err: unknown) => {
-      console.warn('[feishu] streamContent failed:', err instanceof Error ? err.message : err);
-    });
-  }
-
-  private updateToolProgress(chatId: string, tools: ToolCallInfo[]): void {
-    const state = this.activeCards.get(chatId);
-    if (!state) return;
-    state.toolCalls = tools;
-    this.updateCardContent(chatId, state.pendingText || '');
-  }
-
-  async finalizeCard(
-    chatId: string,
-    status: 'completed' | 'interrupted' | 'error',
-    responseText: string,
-    tokenUsage?: TokenUsage | null,
-  ): Promise<boolean> {
-    const pending = this.cardCreatePromises.get(chatId);
-    if (pending) {
-      try { await pending; } catch { /* no card */ }
-    }
-
-    const state = this.activeCards.get(chatId);
-    if (!state || !this.restClient) return false;
-
-    if (state.throttleTimer) {
-      clearTimeout(state.throttleTimer);
-      state.throttleTimer = null;
-    }
-
-    try {
-      state.sequence++;
-      await (this.restClient as any).cardkit.v1.card.settings({
-        path: { card_id: state.cardId },
-        data: {
-          settings: JSON.stringify({ config: { streaming_mode: false } }),
-          sequence: state.sequence,
-        },
-      });
-
-      const statusLabels: Record<string, string> = {
-        completed: '✅ Completed',
-        interrupted: '⚠️ Interrupted',
-        error: '❌ Error',
-      };
-      const elapsedMs = Date.now() - state.startTime;
-      const footer: { status: string; elapsed: string; tokens?: string; cost?: string; context?: string } = {
-        status: statusLabels[status] || status,
-        elapsed: formatElapsed(elapsedMs),
-      };
-
-      if (tokenUsage) {
-        const inTok = tokenUsage.input_tokens ?? 0;
-        const outTok = tokenUsage.output_tokens ?? 0;
-        const cacheTok = (tokenUsage.cache_read_input_tokens ?? 0) + (tokenUsage.cache_creation_input_tokens ?? 0);
-        footer.tokens = cacheTok > 0
-          ? `↓${formatTokenCount(inTok)} ↑${formatTokenCount(outTok)} (cache ${formatTokenCount(cacheTok)})`
-          : `↓${formatTokenCount(inTok)} ↑${formatTokenCount(outTok)}`;
-        if (tokenUsage.cost_usd != null) {
-          footer.cost = `$${tokenUsage.cost_usd.toFixed(4)}`;
-        }
-        const totalTokens = inTok + outTok;
-        const CONTEXT_WINDOW_TOKENS = 200_000; // Claude Sonnet 4 context window
-        const contextPct = (totalTokens / CONTEXT_WINDOW_TOKENS * 100).toFixed(1);
-        footer.context = `${contextPct}%`;
-      }
-
-      const finalCardJson = buildFinalCardJson(responseText, state.toolCalls, footer);
-      state.sequence++;
-      await (this.restClient as any).cardkit.v1.card.update({
-        path: { card_id: state.cardId },
-        data: {
-          card: { type: 'card_json', data: finalCardJson },
-          sequence: state.sequence,
-        },
-      });
-
-      console.log(`[feishu] Card finalized: cardId=${state.cardId}, status=${status}, elapsed=${formatElapsed(elapsedMs)}`);
-      return true;
-    } catch (err: any) {
-      const fv = err?.response?.data?.field_violations;
-      if (fv) {
-        console.warn('[feishu] Card finalize field violations:', JSON.stringify(fv));
-      }
-      console.warn('[feishu] Card finalize failed:', err instanceof Error ? err.message : err);
-      return false;
-    } finally {
-      this.activeCards.delete(chatId);
-    }
-  }
-
-  private cleanupCard(chatId: string): void {
-    this.cardCreatePromises.delete(chatId);
-    const state = this.activeCards.get(chatId);
-    if (!state) return;
-    if (state.throttleTimer) clearTimeout(state.throttleTimer);
-    this.activeCards.delete(chatId);
-  }
-
-  hasActiveCard(chatId: string): boolean {
-    return this.activeCards.has(chatId);
-  }
-
-  /** Return the underlying WebSocket readyState (1 = OPEN), or null if no instance. */
-  getWsReadyState(): number | null {
-    const ws = (this.wsClient as any)?.wsConfig?.getWSInstance?.();
-    return ws?.readyState ?? null;
-  }
-
   // ── Streaming adapter interface ────────────────────────────
 
   onStreamText(chatId: string, fullText: string): void {
-    if (!this.activeCards.has(chatId)) {
+    if (!this.cardManager.hasActiveCard(chatId)) {
       const messageId = this.lastIncomingMessageId.get(chatId);
-      this.createStreamingCard(chatId, messageId).then((ok) => {
-        if (ok) this.updateCardContent(chatId, fullText);
+      this.cardManager.createStreamingCard(chatId, messageId).then((ok) => {
+        if (ok) this.cardManager.updateCardContent(chatId, fullText);
       }).catch(() => {});
       return;
     }
-    this.updateCardContent(chatId, fullText);
+    this.cardManager.updateCardContent(chatId, fullText);
   }
 
   onToolEvent(chatId: string, tools: ToolCallInfo[]): void {
-    this.updateToolProgress(chatId, tools);
+    this.cardManager.updateToolProgress(chatId, tools);
   }
 
   async onStreamEnd(
@@ -555,7 +263,17 @@ export class FeishuClient {
     responseText: string,
     tokenUsage?: TokenUsage | null,
   ): Promise<boolean> {
-    return this.finalizeCard(chatId, status, responseText, tokenUsage);
+    return this.cardManager.finalizeCard(chatId, status, responseText, tokenUsage);
+  }
+
+  hasActiveCard(chatId: string): boolean {
+    return this.cardManager.hasActiveCard(chatId);
+  }
+
+  /** Return the underlying WebSocket readyState (1 = OPEN), or null if no instance. */
+  getWsReadyState(): number | null {
+    const ws = (this.wsClient as any)?.wsConfig?.getWSInstance?.();
+    return ws?.readyState ?? null;
   }
 
   // ── Send (3-layer degradation) ─────────────────────────────
@@ -996,7 +714,7 @@ export class FeishuClient {
         const fs = await import('node:fs');
         const os = await import('node:os');
         const path = await import('node:path');
-        const tmpPath = path.join(os.tmpdir(), `feishu-dl-${crypto.randomUUID()}`);
+        const tmpPath = path.join(os.tmpdir(), `feishu-dl-${(await import('node:crypto')).randomUUID()}`);
         try {
           await res.writeFile(tmpPath);
           buffer = fs.readFileSync(tmpPath);
@@ -1016,7 +734,7 @@ export class FeishuClient {
         : 'bin';
 
       return {
-        id: crypto.randomUUID(),
+        id: (await import('node:crypto')).randomUUID(),
         name: `${fileKey}.${ext}`,
         type: mimeType,
         size: buffer.length,
