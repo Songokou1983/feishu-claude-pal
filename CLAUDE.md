@@ -429,6 +429,110 @@ journalctl --user -u feishu-bridge.service -n 50
 - APP_ID/SECRET 会经 SDK 序列化进 `--mcp-config` JSON，出现在子进程 cmdline（只 son_goku 自己可见，跟 minimax/glm secret 同处理）
 - 首次启动 npx 下载包会慢 10-20 秒
 
+## Private Memory (Claude Memory Bridge)
+
+**目标**：让飞书侧能管理 Claude Code CLI 自己的记忆 ——「私人助手」定位的核心能力。
+
+### 设计原则
+
+- **不重复造轮子**：Claude Code CLI 已经会自动加载 `~/.claude/CLAUDE.md` 到 system prompt；bridge 直接桥接到这个机制，不另存一份 KV。
+- **不冲突**：bridge 只在 `~/.claude/CLAUDE.md` 里维护一个独立区间（marker 标记），CLI 写的部分 byte-for-byte 保留。
+- **飞书侧管理**：你在飞书发 `/remember` 改的就是 Claude 自己的 CLAUDE.md，跨 chat / 跨 session 生效。
+
+### 实现
+
+源码：`src/claude-memory.ts`（`ClaudeMemory` 类） + `src/bridge.ts`（4 个命令）。
+
+bridge 写入的格式：
+
+```markdown
+... (CLI / 你之前 AI 写的内容) ...
+
+<!-- BRIDGE_MEMORY_START -->
+
+## language
+用中文回复
+
+## style
+简短直接
+
+<!-- BRIDGE_MEMORY_END -->
+```
+
+- `<!-- BRIDGE_MEMORY_START/END -->` 标记是 bridge 的写入边界
+- CLI / 你手编的 `~/.claude/CLAUDE.md` **其他部分完全保留**
+- 多次 `/remember` 自动 upsert（不重复添加同名 key）
+- `/forget` 把区间内对应 section 删除；区间变空时整个 marker 块移除
+
+### 命令
+
+| 命令 | 作用 | 示例 |
+|------|------|------|
+| `/remember <key> <value>` | 存记忆 | `/remember style 简短直接` |
+| `/recall [key]` | 不带 key 显示完整 `~/.claude/CLAUDE.md`；带 key 显示单条 value | `/recall style` |
+| `/forget <key>` | 删除一条 | `/forget style` |
+| `/memories` | 列出 bridge 管理的所有 entries | — |
+
+### 验证
+
+已验证（2026-07-02）：`/remember style 简短直接` 后，Claude 在新对话里**真的**按偏好回复（"认识。简短直接、说做就做……"）—— 说明 system prompt 自动加载 `~/.claude/CLAUDE.md` 生效。
+
+### 已知边界 / Phase 2 待做
+
+- ❌ **多行 value 不支持**（`/remember` 不接受换行）—— Phase 2
+- ❌ **无 file lock** —— Phase 1 单用户 + 低并发风险可接受；Phase 2 加 fcntl 锁防止与 CLI /memory 编辑冲突
+- ❌ **不自动 redaction** —— 用户自己负责不要存 secrets（建议：不在 key/value 里写密码 / token / API key）
+- ❌ **不自动建议记忆** —— Claude 不会主动说"要不要记住这个"，需要用户手动 `/remember`
+
+### 与 CLI /memory 的关系
+
+| 写入方 | 文件位置 | bridge 是否动 |
+|--------|----------|----------------|
+| 用户手编（手动编辑） | 文件任意位置 | ❌ 不动 |
+| CLI `/memory` 命令 | 整文件 | ❌ 不动（区间外） |
+| **bridge `/remember`** | 末尾 BRIDGE 区间 | ✅ 写入 |
+| 飞书侧 `/recall` (无 key) | 读全文件 | ❌ 只读 |
+
+两边**不会冲突**，因为：
+- bridge 写入有明确 marker
+- 区间外 byte-for-byte 保留
+- 写入是 atomic（先写 tmp 再 rename）
+
+### 调试
+
+```bash
+# 看 bridge 区间当前内容
+grep -A 5 "BRIDGE_MEMORY" ~/.claude/CLAUDE.md
+
+# 看 Claude 怎么读 CLAUDE.md（CLI 自动，应该生效）
+claude --version
+# 然后新起一个 claude 问"你认识我吗"
+```
+
+## Project Identity (私人助手定位)
+
+**这是个**个人 AI 助手 fork，不是通用工具**。
+
+跟 [zarazhangrui/lark-coding-agent-bridge](https://github.com/zarazhangrui/lark-coding-agent-bridge) 1.6k⭐ 的差异：
+- 那个项目：多 IM / 多 agent / 多用户场景 → 通用工具
+- 这个 fork：**专注 Claude Code + 飞书 + 单用户私人助手** → 差异化
+
+### 私人助手特性优先级
+
+✅ **做**（私人化 + 实用）：
+- `/remember /recall /forget` —— 让 Claude 认识你
+- 飞书侧管理 Claude CLI 记忆
+
+❌ **不做**（不是私人助手核心 / 超出范围）：
+- 多 IM 平台（Slack/Discord/Telegram 等）—— 你只要飞书
+- 多 agent 后端（Codex 等）—— 你只用 Claude
+- Profiles / 多 bot —— 本地用
+- 云文档评论触发 —— 通用
+- 定时任务 cron —— 按需触发更好
+- Web UI —— 私人不必要
+- OS-user 隔离 —— 单机用
+- 语音消息 —— 不常用
+
 ## For Architecture & Implementation Details
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) — read that file before making code changes.
